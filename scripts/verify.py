@@ -1,0 +1,137 @@
+"""Offline verification: tests, syntax, complete staging, and real HTTP delivery.
+
+python scripts/verify.py --rebuild   # rebuild from cached raw snapshots first
+python scripts/verify.py            # verify and stage current generated pages
+python scripts/verify.py --code-only  # tests/syntax on a checkout without data
+
+Python 3.11+ and Node.js are required; neither needs installed packages.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import functools
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+from html.parser import HTMLParser
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+import serve
+import stage_public
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class Scripts(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.active = False
+        self.inline: list[str] = []
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            attrs = dict(attrs)
+            self.active = not attrs.get("src") and attrs.get("type", "text/javascript") in {"text/javascript", "application/javascript", "module"}
+            self.parts = []
+
+    def handle_data(self, data):
+        if self.active:
+            self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self.active:
+            self.inline.append("".join(self.parts))
+            self.active = False
+
+
+def run(args: list[str]) -> None:
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    subprocess.run(args, cwd=ROOT, env=env, check=True)
+
+
+def syntax_checks(include_pages: bool = True) -> None:
+    paths = [*sorted((ROOT / "scripts").glob("*.py")), *sorted((ROOT / "tests").glob("*.py"))]
+    for path in paths:
+        ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+    node = shutil.which("node")
+    if not node:
+        raise RuntimeError("Node.js is required to validate browser JavaScript; install it and rerun")
+    count = 0
+    for path in sorted(p for p in (ROOT / "public").rglob("*") if p.suffix in {".js", ".mjs"}):
+        run([node, "--check", str(path)])
+        count += 1
+    if include_pages:
+        with tempfile.TemporaryDirectory(prefix="vigie-js-") as temp:
+            for page in sorted((ROOT / "public").rglob("*.html")):
+                scripts = Scripts()
+                scripts.feed(page.read_text(encoding="utf-8"))
+                for i, script in enumerate(scripts.inline):
+                    target = Path(temp) / f"{page.stem}-{i}.js"
+                    target.write_text(script, encoding="utf-8")
+                    run([node, "--check", str(target)])
+                    count += 1
+    print(f"Syntax: {len(paths)} Python files, {count} JavaScript files/blocks", flush=True)
+
+
+class QuietHandler(serve.VigieHandler):
+    def log_message(self, *args):
+        pass
+
+
+def smoke_site(directory: Path, manifest: dict) -> None:
+    handler = functools.partial(QuietHandler, directory=directory, methods={})
+    with ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            for name, meta in manifest["files"].items():
+                with urlopen(f"{base}/{name}", timeout=5) as response:
+                    body = response.read()
+                    if len(body) != meta["bytes"] or hashlib.sha256(body).hexdigest() != meta["sha256"]:
+                        raise RuntimeError(f"HTTP content mismatch: {name}")
+                    if response.headers.get("X-Content-Type-Options") != "nosniff":
+                        raise RuntimeError(f"Missing safe content-type header: {name}")
+                with urlopen(Request(f"{base}/{name}", method="HEAD"), timeout=5) as response:
+                    if int(response.headers["Content-Length"]) != meta["bytes"] or response.read():
+                        raise RuntimeError(f"Incorrect HEAD response: {name}")
+            with urlopen(base + "/", timeout=5) as response:
+                if hashlib.sha256(response.read()).hexdigest() != manifest["files"]["index.html"]["sha256"]:
+                    raise RuntimeError("Homepage route differs from staged index.html")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+    print(f"HTTP: {len(manifest['files'])} files match manifest; GET, HEAD, and homepage pass", flush=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--rebuild", action="store_true")
+    mode.add_argument("--code-only", action="store_true")
+    args = parser.parse_args()
+    try:
+        run([sys.executable, "-m", "unittest", "discover", "-s", "tests"])
+        if args.rebuild:
+            run([sys.executable, str(ROOT / "scripts" / "pipeline.py"), "--offline"])
+        syntax_checks(include_pages=not args.code_only)
+        if not args.code_only:
+            manifest = stage_public.stage()
+            smoke_site(stage_public.OUT, manifest)
+    except (OSError, ValueError, SyntaxError, RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"Verification failed: {exc}", file=sys.stderr)
+        return 1
+    print("Verification passed" + (" (code only; no generated release checked)" if args.code_only else "; static release ready in deploy/public (not uploaded)"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

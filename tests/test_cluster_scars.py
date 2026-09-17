@@ -1,0 +1,167 @@
+"""Named-scar clustering: word boundaries, no TV hitchhike, no single-feed theater."""
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import harness
+
+import cluster_issues
+
+
+class ScarOf(unittest.TestCase):
+    def test_maelyne_name(self) -> None:
+        self.assertEqual(
+            cluster_issues.scar_of({"title": "Mort de Maëlyne Lugez", "summary": ""}),
+            "maelyne-levis",
+        )
+
+    def test_tramway_needs_marchand_or_duhaime_in_title(self) -> None:
+        self.assertIsNone(
+            cluster_issues.scar_of({"title": "Le tramway avance", "summary": "Marchand dit non"})
+        )
+        self.assertEqual(
+            cluster_issues.scar_of({"title": "Marchand défend le tramway", "summary": ""}),
+            "tramway",
+        )
+
+    def test_airport_privatisation(self) -> None:
+        self.assertEqual(
+            cluster_issues.scar_of(
+                {"title": "Le Canada privatisera ses aéroports", "summary": ""}
+            ),
+            "airport",
+        )
+
+    def test_marchand_title(self) -> None:
+        self.assertEqual(
+            cluster_issues.scar_of({"title": "Les priorités de Marchand", "summary": ""}),
+            "marchand",
+        )
+
+    def test_marchand_mayor_agenda_in_summary(self) -> None:
+        self.assertEqual(
+            cluster_issues.scar_of(
+                {
+                    "title": "Le maire de Québec dépose sa liste",
+                    "summary": "Bruno Marchand cible le logement",
+                }
+            ),
+            "marchand",
+        )
+
+    def test_marchand_summary_hitchhiker_without_title_gate_dropped(self) -> None:
+        self.assertIsNone(
+            cluster_issues.scar_of(
+                {
+                    "title": "Élections dans la Capitale-Nationale",
+                    "summary": "Marchand sera interrogé plus tard",
+                }
+            )
+        )
+
+    def test_no_scar(self) -> None:
+        self.assertIsNone(cluster_issues.scar_of({"title": "Un concert à Lyon", "summary": ""}))
+
+    def test_tramway_scar_beats_marchand_when_both(self) -> None:
+        self.assertEqual(
+            cluster_issues.scar_of({"title": "Duhaime veut arrêter le tramway", "summary": ""}),
+            "tramway",
+        )
+
+
+class Helpers(unittest.TestCase):
+    def test_geo_of_prefers_enrich(self) -> None:
+        c = {"geo": "linked", "enrich": {"geo": {"geo": "quebec-city"}}}
+        self.assertEqual(cluster_issues.geo_of(c), "quebec-city")
+
+    def test_geo_of_fallback(self) -> None:
+        self.assertEqual(cluster_issues.geo_of({"geo": "quebec"}), "quebec")
+        self.assertEqual(cluster_issues.geo_of({}), "unknown")
+
+    def test_topic_of(self) -> None:
+        self.assertEqual(cluster_issues.topic_of({}), "other")
+        self.assertEqual(
+            cluster_issues.topic_of({"enrich": {"topics": [{"topic": "housing"}]}}),
+            "housing",
+        )
+
+    def test_neutral_question_locked_and_fallback(self) -> None:
+        self.assertIn("aéroport", cluster_issues.neutral_question([], 2, "airport").lower())
+        self.assertEqual(
+            cluster_issues.neutral_question([], 1, "newscar"),
+            "Que disent plusieurs sources sur newscar ?",
+        )
+
+    def test_issue_id_stable(self) -> None:
+        self.assertEqual(
+            cluster_issues.issue_id("airport", 5),
+            cluster_issues.issue_id("airport", 5),
+        )
+        self.assertEqual(
+            cluster_issues.issue_id("airport", 5),
+            cluster_issues.issue_id("airport", 4),
+        )
+
+
+class ClusterMain(unittest.TestCase):
+    def tearDown(self) -> None:
+        cluster_issues.IN_PATH = harness.ROOT / "data" / "normalized" / "latest_enriched.json"
+        cluster_issues.OUT_ISSUES = harness.ROOT / "data" / "issues" / "latest_issues.json"
+
+    def test_main_missing_input_exits(self) -> None:
+        cluster_issues.IN_PATH = Path("/no/such/enriched.json")
+        with self.assertRaises(SystemExit):
+            cluster_issues.main()
+
+    def test_main_drops_single_voice_and_writes_multi(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            d = Path(raw)
+            inp = d / "in.json"
+            out = d / "out.json"
+            def item(sid: str, title: str, geo: str) -> dict:
+                return {
+                    "id": sid + title[:8],
+                    "title": title,
+                    "summary": "",
+                    "url": "https://example.test/" + sid,
+                    "source_id": sid,
+                    "source_name": sid,
+                    "language": "fr",
+                    "enrich": {
+                        "geo": {"geo": geo},
+                        "topics": [{"topic": "trade"}],
+                    },
+                }
+
+            payload = {
+                "candidates": [
+                    item("le-devoir", "Le Canada privatisera ses aéroports", "quebec"),
+                    item("cbc-politics", "Canada to privatize airports", "quebec"),
+                    item("radio-canada-quebec", "Seul sur le tramway et Marchand", "quebec-city"),
+                ]
+            }
+            inp.write_text(json.dumps(payload), encoding="utf-8")
+            cluster_issues.IN_PATH = inp
+            cluster_issues.OUT_ISSUES = out
+            cluster_issues.main()
+            written = json.loads(out.read_text(encoding="utf-8"))
+            scars = [i["scar"] for i in written["issues"]]
+            self.assertIn("airport", scars)
+            self.assertNotIn("tramway", scars)
+            self.assertEqual(written["dropped_single_voice"], 1)
+            self.assertIn("word-boundary", written["method"])
+            self.assertIn("official", written["method"])
+            self.assertIn("media_remix", written["method"])
+            self.assertIn("institution", written["method"])
+            self.assertIn("silence", written["method"])
+            airport = next(i for i in written["issues"] if i["scar"] == "airport")
+            self.assertEqual(set(airport["sources"]), {"cbc", "le-devoir"})
+            labels = [t["label"] for t in airport["tensions"]]
+            self.assertTrue(any("CBC" in lab for lab in labels))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,26 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.coverage
+htmlcov/
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+.kilo/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Rebuildable snapshots and publish output (public/assets stays source-controlled)
+/data/
+/deploy/
+/public/*.html
+/public/build-manifest.json
+
+# Historical one-off patch scripts and execution logs
+/_*.py
+/_*.txt

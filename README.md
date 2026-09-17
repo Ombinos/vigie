@@ -1,0 +1,63 @@
+# Vigie
+
+**Québec, à hauteur de vie.** A finite local briefing: understand what was published, inspect the sources, find a useful next step, and get on with your day.
+
+French-first, account-free, static HTML. No paid APIs, analytics, geolocation, or generated news on the resident homepage. Search and reading markers stay in the browser.
+
+## Run
+
+Python 3.12+ and Node.js for verification. No package installation required. Tested on Windows with Python 3.14.
+
+```text
+python -X utf8 scripts/pipeline.py
+python -X utf8 scripts/verify.py
+python -X utf8 scripts/serve.py
+```
+
+Open http://127.0.0.1:8765/
+
+Use `--port 8771` if the default port is occupied.
+
+```text
+python -X utf8 scripts/pipeline.py --offline      # rebuild cached RSS, no network
+python -X utf8 scripts/pipeline.py --render-only  # render existing enriched data
+python -X utf8 scripts/verify.py --rebuild        # tests + offline rebuild + release checks
+python -X utf8 scripts/verify.py --code-only      # code checks without downloaded data
+python -X utf8 scripts/check_claims.py            # extraction provenance, not truth verification
+```
+
+Verification stages a complete release in `deploy/public/`, checks links and asset hashes, and tests real HTTP GET/HEAD responses. It does not upload or schedule refreshes. A clean checkout needs one online pipeline run to produce real data.
+
+## Product surfaces
+
+- `/`: French resident brief. Six articles per step, source excerpts, comparisons, place/topic/search filters, saved articles and an explicit reading marker.
+- `/explorer.html`: older experimental evidence workbench, retained for inspection with explicit limitations.
+- `/morning.html`: experimental dossier companion from the same issue store.
+
+The brief uses publication dates during the seven days preceding the edition. It starts with Québec and nearby places; broader feeds require an explicit territory choice. Neighborhoods are mentions in source text, not guarantees of geographic impact. Saved markers do not archive publisher articles.
+
+Read [PRODUCT_AUDIT.md](PRODUCT_AUDIT.md) for the co-founder assessment, implementation decisions, remaining limits and next experiments.
+
+## Law of the house
+
+| File | Role |
+|------|------|
+| `VISION.md` | Vow — vision / mission / kill list |
+| `sources.yaml` | Finite source chancellery |
+| `RENT.md` | Who pays (v0 = Inventor wallet) |
+| `ranking.md` | Published weights + change log |
+| `TECHNICAL_PROCESS.md` | How the pipe works |
+
+## Pipe
+
+ingest → normalize → enrich (proposed) → cluster dossiers → rank → resident brief + explorer + morning
+
+Classifications and dossiers are provisional. Named institutions do not prove independent ownership or reporting. Publication, collection, grouping and build time remain distinct.
+
+Source files and `public/assets/` are authoritative. Data snapshots, generated HTML, deployment output, caches and historical patch logs are excluded from version control.
+
+## Success / failure
+
+Wrong: skim-feed; Near me full of world wire; single-voice “Issues”; selling the rank.
+
+Right: a resident returns because city → province → linked chains beat propaganda fog on something that hits their life.

@@ -1,0 +1,342 @@
+"""A finite, French-first resident brief. No generated news or inferred advice.
+
+Rendering is deterministic, offline, and uses the same public ranking. Search and
+saved stories run in the browser; no account, analytics, or location collection.
+"""
+from __future__ import annotations
+
+import hashlib
+import html
+import json
+import re
+import unicodedata
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from ingest_rss import public_http_url
+
+ROOT = Path(__file__).resolve().parents[1]
+WINDOW_DAYS = 7
+TOPICS = {
+    "housing": "Se loger", "transport": "Se déplacer", "energy/hydro": "Énergie",
+    "education": "Éducation", "law": "Vie publique", "health": "Santé",
+    "trade": "Économie", "economy": "Économie", "security": "Sécurité",
+    "environment": "Environnement", "death": "Société", "culture": "Culture",
+    "other": "Vie locale",
+}
+AREAS = {
+    "cite": ("La Cité-Limoilou", r"\b(?:limoilou|saint[- ]roch|saint[- ]sauveur|montcalm|saint[- ]sacrement|vieux[- ]quebec|saint[- ]jean[- ]baptiste|lairet|maizerets)\b"),
+    "rivières": ("Les Rivières", r"\b(?:les rivieres|duberger|les saules|lebourgneuf|(?:quartier|secteur|a) vanier)\b"),
+    "foy": ("Sainte-Foy–Sillery–Cap-Rouge", r"\b(?:sainte[- ]foy|sillery|cap[- ]rouge)\b"),
+    "charlesbourg": ("Charlesbourg", r"\bcharlesbourg\b"),
+    "beauport": ("Beauport", r"\bbeauport\b"),
+    "haute": ("La Haute-Saint-Charles", r"\b(?:haute[- ]saint[- ]charles|val[- ]belair|loretteville|saint[- ]emile|lac[- ]saint[- ]charles)\b"),
+    "levis": ("Lévis", r"\blevis\b"),
+}
+SERVICES = (
+    ("01", "Avant de partir", "Entraves et travaux", "La carte officielle des travaux sur votre trajet.", "https://carte.ville.quebec.qc.ca/"),
+    ("02", "Transport en commun", "Mon parcours RTC", "Horaires, avis et outils du Réseau de transport de la Capitale.", "https://www.rtcquebec.ca/restez-informe"),
+    ("03", "Avoir son mot à dire", "Consultations publiques", "Les projets sur lesquels la Ville consulte les citoyens.", "https://participationcitoyenne.ville.quebec.qc.ca/"),
+    ("04", "L’hiver à Québec", "Alertes de déneigement", "S’abonner directement aux avis de la Ville.", "https://www.ville.quebec.qc.ca/apropos/espace-presse/abonnement/alertes_sms.aspx"),
+)
+
+
+def esc(value: object) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def plain(value: object) -> str:
+    text = html.unescape(str(value or ""))
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", text)).strip()
+
+
+def folded(value: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(c))
+
+
+def safe_url(value: object) -> str:
+    value = str(value or "").strip()
+    try:
+        if re.search(r"[\x00-\x20\x7f\\]", value):
+            return ""
+        return public_http_url(value)
+    except (ValueError, TypeError):
+        return ""
+
+
+def parse_date(raw: object) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    for parser in (lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")), parsedate_to_datetime):
+        try:
+            dt = parser(raw.strip())
+            if dt.tzinfo is not None:
+                return dt.astimezone(timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return None
+
+
+def date_html(value: object, *, fallback: str = "Date non précisée") -> str:
+    dt = parse_date(value)
+    if dt is None:
+        return esc(fallback)
+    # Browser localizes to Québec, including DST. UTC is an honest no-JS fallback.
+    return f'<time datetime="{dt.isoformat()}">{dt:%Y-%m-%d %H:%M} UTC</time>'
+
+
+def collection_status(run: dict, now: datetime) -> dict:
+    results = run.get("results") or []
+    by_id = {r.get("source_id"): r for r in results if isinstance(r, dict)}
+    enabled = run.get("enabled_rss") or list(by_id)
+    ok = sum(bool(by_id.get(s, {}).get("ok")) and not by_id.get(s, {}).get("parse_error") for s in enabled)
+    stamp = parse_date(run.get("fetched_at"))
+    age = (now - stamp).total_seconds() if stamp else None
+    stale = not enabled or age is None or age > 6 * 3600 or age < -300
+    return {"ok": ok, "total": len(enabled), "stale": stale,
+            "partial": not enabled or ok < len(enabled), "at": stamp.isoformat() if stamp else "",
+            "failed": [s for s in enabled if not by_id.get(s, {}).get("ok") or by_id.get(s, {}).get("parse_error")]}
+
+
+def latest_run() -> dict:
+    paths = sorted((ROOT / "data" / "raw").glob("_run_*.json"), reverse=True)
+    if paths:
+        try:
+            return json.loads(paths[0].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
+def prepare_items(ranked: list[dict], now: datetime) -> tuple[list[dict], int]:
+    """Preserve rank order; age gate by publication, never fetch time."""
+    rows, excluded, seen = [], 0, set()
+    for item in ranked:
+        url = safe_url(item.get("url"))
+        title = plain(item.get("title"))
+        when = parse_date(item.get("published_at"))
+        if not title or not url:
+            excluded += 1
+            continue
+        if when is None or (now - when).total_seconds() < -300 or (now - when).days >= WINDOW_DAYS:
+            excluded += 1
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        enrich = item.get("enrich") or {}
+        geo = (enrich.get("geo") or {}).get("geo", item.get("display_geo", "linked"))
+        topic_ids = [t.get("topic", "other") for t in enrich.get("topics", []) if isinstance(t, dict)] or ["other"]
+        text = folded(title + " " + plain(item.get("summary")))
+        areas = [key for key, (_, pattern) in AREAS.items() if geo == "quebec-city" and re.search(pattern, text)]
+        # IDs are derived from canonical URLs: syndication/feed changes do not erase bookmarks.
+        uid = hashlib.sha256(url.encode()).hexdigest()[:20]
+        rows.append({**item, "uid": uid, "url": url, "title": title,
+                     "summary": plain(item.get("summary")), "published": when.isoformat(),
+                     "geo": geo, "topics": topic_ids, "areas": areas})
+    return rows, excluded
+
+
+def related_sources(item: dict, issues: list[dict], eligible: dict[str, dict]) -> list[dict]:
+    rows, seen = [], {item["url"]}
+    for issue in issues:
+        entries = [it for voice in issue.get("tensions", []) for it in voice.get("items", [])]
+        if not any(it.get("candidate_id") == item.get("id") for it in entries):
+            continue
+        for entry in entries:
+            other = eligible.get(entry.get("candidate_id"))
+            if other and other["url"] not in seen:
+                seen.add(other["url"])
+                rows.append(other)
+    return rows[:5]
+
+
+NEST_LABELS = {"quebec-city": "Québec et environs", "quebec": "Au Québec", "linked": "Ailleurs"}
+
+
+def dossier_nest(geo_focus: object) -> str:
+    geos = geo_focus or []
+    if "quebec-city" in geos:
+        return "quebec-city"
+    if "quebec" in geos:
+        return "quebec"
+    return "linked"
+
+
+def dossier_units(issue: dict, eligible: dict) -> list[str]:
+    """Checkable units already on dossier items in this brief — never invented."""
+    raws: list[str] = []
+    seen: set[str] = set()
+    for tension in issue.get("tensions") or []:
+        for entry in tension.get("items") or []:
+            row = eligible.get(entry.get("candidate_id"))
+            if not row:
+                continue
+            for impact in (row.get("enrich") or {}).get("impacts") or []:
+                for unit in impact.get("units") or []:
+                    raw = str(unit.get("raw") or "").strip()
+                    if raw and raw not in seen:
+                        seen.add(raw)
+                        raws.append(raw)
+    return raws[:4]
+
+
+def dossier_html(issue: dict, eligible: dict) -> str:
+    """One dossier: the question, who spoke, who stayed silent, sources to compare.
+
+    Grouping is never a contradiction; absence is never proven editorial silence;
+    several media are never several independent confirmations. Judgment stays with
+    the reader.
+    """
+    question = esc(issue.get("question") or "Sujet suivi")
+    nest = dossier_nest(issue.get("geo_focus"))
+    tensions = issue.get("tensions") or []
+    spoke: list[str] = []
+    for tension in tensions:
+        name = str(tension.get("institution_name") or "").strip()
+        if name and name not in spoke:
+            spoke.append(name)
+    spoke_count = int(issue.get("source_count") or len(spoke))
+    bits: list[str] = []
+    for tension in tensions:
+        inst = esc(str(tension.get("institution_name") or "Source").strip())
+        for entry in (tension.get("items") or [])[:2]:
+            url = safe_url(entry.get("url"))
+            if not url:
+                continue
+            bits.append(
+                f'<li><span class="dossier-inst">{inst}</span>'
+                f'<a href="{esc(url)}" rel="noopener noreferrer">{esc(entry.get("title") or "Sans titre")}'
+                f'<span class="arrow" aria-hidden="true"> ↗</span></a></li>'
+            )
+    sources = f'<ul class="dossier-sources">{"".join(bits)}</ul>' if bits else ""
+    spoke_line = (
+        f'<p class="dossier-spoke"><strong>{spoke_count}</strong> sources ont parlé : '
+        + " · ".join(esc(n) for n in spoke[:5])
+        + "</p>"
+    ) if spoke else ""
+    silence = issue.get("silence") or {}
+    quiet = [
+        str(s.get("institution_name") or s.get("source_id") or "").strip()
+        for s in (silence.get("silent") or [])
+        if (s.get("source_kind") or "").lower() == "official"
+    ]
+    quiet = [n for n in quiet if n]
+    silence_line = (
+        '<p class="dossier-silence">Officiellement muets dans cette collecte : <strong>'
+        + " · ".join(esc(n) for n in quiet[:3])
+        + '</strong>. <span class="fine">Une absence dans nos flux n’est pas un silence '
+        'éditorial prouvé, et ce n’est pas un indicateur de biais.</span></p>'
+    ) if quiet else ""
+    remix_line = (
+        '<p class="dossier-remix fine">Aucune source officielle sur ce dossier — '
+        "rapprochement de médias seulement.</p>"
+        if issue.get("media_remix")
+        else ""
+    )
+    units = dossier_units(issue, eligible)
+    units_line = (
+        '<p class="dossier-units">Repères à vérifier : '
+        + "".join(f'<span class="unit">{esc(u[:48])}</span>' for u in units)
+        + "</p>"
+    ) if units else ""
+    return (
+        f'<article class="dossier" data-nest="{esc(nest)}">'
+        f'<div class="dossier-head"><span class="dossier-nest">{esc(NEST_LABELS[nest])}</span>'
+        f'<span class="dossier-count">{spoke_count} sources · rapprochement proposé</span></div>'
+        f'<h3 class="dossier-q">{question}</h3>'
+        f"{spoke_line}{sources}{silence_line}{remix_line}{units_line}"
+        f"</article>"
+    )
+
+
+def dossiers_section(issues: list[dict], eligible: dict) -> str:
+    """Cross-source dossiers on the resident front door — the lookout, in French."""
+    dossiers = [iss for iss in (issues or []) if iss.get("question")]
+    count = len(dossiers)
+    if dossiers:
+        cards = "".join(dossier_html(iss, eligible) for iss in dossiers[:6])
+        label = "dossier proposé" if count == 1 else "dossiers proposés"
+        note = f"{count} {label}<br>cette édition."
+        listing = f'<div class="dossier-list">{cards}</div>'
+    else:
+        note = "Aucun dossier<br>cette édition."
+        listing = (
+            '<p class="no-data">Aucun sujet n’a été rapproché entre plusieurs institutions '
+            "dans cette collecte. Cela ne dit rien de la couverture ailleurs.</p>"
+        )
+    return (
+        '<section class="dossiers" id="dossiers" aria-labelledby="dossiers-title">'
+        '<div class="section-top"><div><p class="eyebrow">REGARD CROISÉ</p>'
+        '<h2 id="dossiers-title">Ce que les sources racontent ensemble.</h2></div>'
+        f'<p class="section-note">{note}</p></div>'
+        '<p class="dossiers-intro">Quand plusieurs institutions parlent du même sujet, Vigie '
+        "les rassemble — sans décider qui a raison. Un rapprochement n’est pas une "
+        "contradiction, et plusieurs médias ne sont pas plusieurs confirmations "
+        "indépendantes.</p>"
+        f"{listing}</section>"
+    )
+
+
+def article_html(item: dict, index: int, related: list[dict]) -> str:
+    title = esc(item["title"])
+    geo = {"quebec-city": "Québec et environs", "quebec": "Au Québec", "linked": "Ailleurs"}.get(item["geo"], "Ailleurs")
+    topic = TOPICS.get(item["topics"][0], "Vie locale")
+    source = esc(item.get("source_name") or item.get("source_id") or "Source")
+    summary = item["summary"]
+    excerpt = summary[:240].rsplit(" ", 1)[0] + "…" if len(summary) > 240 else summary
+    excerpt_html = f'<p class="excerpt">{esc(excerpt)}</p><span class="excerpt-label">Extrait du flux de {source}</span>' if excerpt else '<p class="excerpt-label">Le flux ne fournit pas de résumé. Consultez l’article original.</p>'
+    peers = "".join(f'<li><span>{esc(r.get("source_name") or r.get("source_id"))}</span><a href="{esc(r["url"])}" rel="noopener noreferrer">{esc(r["title"])}</a>{date_html(r["published"])}</li>' for r in related)
+    related_html = f'<p class="evidence-label">Autres articles du dossier proposé</p><ul class="source-list">{peers}</ul><p class="fine">Rapprochement automatique à vérifier. Plusieurs médias ne constituent pas plusieurs confirmations indépendantes.</p>' if peers else '<p class="fine">Aucun autre article rapproché dans cette collecte. Cela ne dit rien de la couverture ailleurs.</p>'
+    kind = '<span class="official">Source officielle</span>' if item.get("source_kind") == "official" else ''
+    place_reason = "Un lieu ou acteur local a été repéré dans le titre ou l’extrait." if item["geo"] == "quebec-city" else "Le classement géographique est proposé à partir du titre et de l’extrait."
+    if item.get("source_kind") == "official" and item["geo"] == "quebec-city":
+        place_reason = "Ce document provient d’une source officielle locale."
+    return f'''<article class="story" id="article-{item['uid']}" data-id="{item['uid']}" data-geo="{esc(item['geo'])}" data-topics="{esc(' '.join(item['topics']))}" data-areas="{esc(' '.join(item['areas']))}" data-search="{esc(folded(item['title'] + ' ' + summary + ' ' + str(item.get('source_name', ''))))}" data-published="{esc(item['published'])}">
+      <div class="story-number" aria-hidden="true">{index:02}</div><div class="story-body">
+      <div class="story-kicker"><span>{esc(topic)}</span><span>{geo}</span>{kind}<span class="new-label" hidden>Nouveau dans la collecte</span></div>
+      <h3><a href="{esc(item['url'])}" rel="noopener noreferrer">{title}<span class="arrow" aria-hidden="true"> ↗</span></a></h3>
+      <p class="byline">{source}<span aria-hidden="true"> · </span>{date_html(item['published'])}{'<span class="language">Article en anglais</span>' if item.get('language') == 'en' else ''}</p>
+      {excerpt_html}
+      <div class="story-actions"><details class="evidence"><summary>Sources et contexte <span aria-hidden="true">＋</span></summary><div class="evidence-body"><p>{place_reason} Ce repérage ne prouve pas un effet sur votre situation.</p>{related_html}</div></details>
+      <button class="save js-only" type="button" data-save="{item['uid']}" aria-pressed="false" aria-label="Garder : {title}">Garder <span aria-hidden="true">＋</span></button></div>
+      </div></article>'''
+
+
+def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None) -> str:
+    now = parse_date(generated_at) or datetime.now(timezone.utc)
+    rows, excluded = prepare_items(ranked, now)
+    run = latest_run() if run is None else run
+    status = collection_status(run, now)
+    eligible = {r.get("id"): r for r in rows}
+    stories = "".join(article_html(r, n + 1, related_sources(r, issues, eligible)) for n, r in enumerate(rows))
+    areas = "".join(f'<option value="{esc(k)}">{esc(v[0])}</option>' for k, v in AREAS.items())
+    topics = (("all", "Tout"), ("transport", "Se déplacer"), ("housing", "Se loger"), ("health", "Santé"), ("law", "Vie publique"), ("culture", "Culture"))
+    filters = "".join(f'<button type="button" data-topic="{k}" aria-pressed="{"true" if k == "all" else "false"}">{v}</button>' for k, v in topics)
+    service_html = "".join(f'<a class="service" href="{url}" rel="noopener noreferrer"><span class="service-index">{num} / {esc(eyebrow)}</span><h3>{esc(title)} <span aria-hidden="true">↗</span></h3><p>{esc(desc)}</p></a>' for num, eyebrow, title, desc, url in SERVICES)
+    outcomes = {r.get("source_id"): r for r in run.get("results", []) if isinstance(r, dict)}
+    source_rows = "".join(f'<li><span>{esc(sid)}</span><span>{"Collecté" if outcomes.get(sid, {}).get("ok") and not outcomes.get(sid, {}).get("parse_error") else "Indisponible"}</span></li>' for sid in (run.get("enabled_rss") or list(outcomes)))
+    status_label = "État des sources inconnu" if not status["total"] else "Collecte indisponible" if not status["ok"] else "Collecte à actualiser" if status["stale"] else "Collecte partielle" if status["partial"] else "Dernière collecte"
+    coverage = f'{status["ok"]} flux disponibles sur {status["total"]}' if status["total"] else 'État des sources inconnu'
+    empty = '<p class="no-data">Aucun article récent avec une date de publication exploitable. Consultez les sources officielles ci-dessous.</p>' if not rows else ''
+    return f'''<!doctype html>
+<html lang="fr-CA"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Comprendre ce qui bouge à Québec. Un point local, des sources à comparer et des repères pour agir. Sans compte, sans fil infini.">
+<meta name="theme-color" content="#152f3a"><meta name="referrer" content="no-referrer">
+<title>Vigie — Québec, à hauteur de vie</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/brief.css"><script src="/assets/brief.js" defer></script></head>
+<body><a class="skip-link" href="#essentiel">Aller aux nouvelles</a>
+<header class="masthead"><a class="wordmark" href="/" aria-label="Vigie, accueil"><svg width="28" height="32" viewBox="0 0 28 32" aria-hidden="true"><path d="M2 5 14 28 26 5M8 5l6 12 6-12" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>vigie<span class="wordmark-dot">.</span></a><span class="edition">QUÉBEC, À HAUTEUR DE VIE</span><nav aria-label="Navigation principale"><a href="#essentiel">Le point</a><a href="#dossiers">Les dossiers</a><a href="#agir">Repères utiles</a><a href="#methode">Notre méthode</a></nav></header>
+<main><section class="intro" aria-labelledby="intro-title"><div><p class="eyebrow">UNE VILLE. VOTRE QUOTIDIEN.</p><h1 id="intro-title">Moins de bruit.<br><em>Plus de Québec.</em></h1><p class="intro-text">Les nouvelles locales. Les sources pour comprendre. Les repères pour agir. Puis, reprenez votre journée.</p></div>
+<aside class="edition-note" aria-label="Fraîcheur des informations"><div class="compass" aria-hidden="true"><span>N</span><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="43"/><path d="M60 5v22M60 93v22M5 60h22M93 60h22M60 31l13 42-13-8-13 8Z"/></svg></div><p class="eyebrow">LE POINT DE REPÈRE</p><p id="freshness-label" class="freshness{' warning' if status['stale'] or status['partial'] else ''}" data-fetched="{esc(status['at'])}" data-partial="{str(status['partial']).lower()}" data-total="{status['total']}" data-ok="{status['ok']}">{status_label}</p><p class="edition-time">{date_html(status['at'], fallback='Aucune collecte horodatée')}</p><a class="coverage-link" href="#couverture">{coverage} <span aria-hidden="true">↗</span></a><p class="fine">Un instantané des sources. Pas un service d’alerte en temps réel.</p></aside></section>
+<section class="brief" id="essentiel" aria-labelledby="brief-title"><div class="section-top"><div><p class="eyebrow">L’ESSENTIEL, À VOTRE ÉCHELLE</p><h2 id="brief-title">Faire le point.</h2></div><p class="section-note">7 jours de publications.<br>Édition du {date_html(generated_at)}.</p></div>
+<div class="visit-strip js-only"><p id="visit-status" role="status">Une première visite ? Prenez vos repères.</p><button id="remember" type="button">Mémoriser ce point de lecture</button></div>
+<div class="controls js-only"><div class="view-tabs" role="group" aria-label="Vue des articles"><button type="button" data-view="brief" aria-pressed="true">Le point local</button><button type="button" data-view="new" aria-pressed="false">Depuis mon repère <span id="new-count"></span></button><button type="button" data-view="saved" aria-pressed="false">Mes articles gardés <span id="saved-count"></span></button></div>
+<div class="search-row"><label class="search-label"><span class="sr-only">Rechercher dans les titres et extraits</span><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5"/></svg><input id="search" type="search" placeholder="Une rue, un sujet, un nom…" autocomplete="off" maxlength="200"></label><label class="select-label"><span>Territoire</span><select id="scope"><option value="local">Québec et environs</option><option value="province">Tout le Québec</option><option value="all">Tous les flux</option></select></label><label class="select-label"><span>Lieu mentionné</span><select id="area"><option value="all">Tous les lieux</option>{areas}</select></label></div><div class="topic-filters" role="group" aria-label="Thème des articles">{filters}</div><p class="filter-note">Les lieux et thèmes sont repérés automatiquement. Un lieu absent d’un extrait peut échapper au filtre.</p></div>
+<noscript><p class="notice">Tous les articles récents sont affichés. La recherche et les repères personnels nécessitent JavaScript.</p></noscript>
+<div class="results-bar"><p id="result-count" role="status">{len(rows)} articles récents dans les flux collectés</p><button class="text-button js-only" type="button" id="reset-filters">Réinitialiser les filtres</button></div><div id="stories">{stories}{empty}</div>
+<div id="no-results" class="no-data" hidden><h3>Aucun article dans cette vue.</h3><p>Essayez un autre lieu ou élargissez le territoire. Une absence dans nos flux ne signifie pas qu’il ne se passe rien.</p><button type="button" id="empty-reset">Voir le point local</button></div>
+<div class="brief-end"><p id="end-note">Vous avez fait le tour de cette sélection.</p><button class="js-only" id="show-more" type="button">Voir les autres articles</button><span class="fine">Pas de défilement infini. Revenez quand vous en avez besoin.</span></div></section>
+{dossiers_section(issues, eligible)}
+<section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>
+<section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
+<footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span></footer><div id="toast" role="status" aria-live="polite"></div></body></html>'''
