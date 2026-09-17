@@ -278,6 +278,92 @@ def dossiers_section(issues: list[dict], eligible: dict) -> str:
     )
 
 
+def _delta_text(delta: dict | None) -> str:
+    delta = delta or {}
+    parts: list[str] = []
+    added = int(delta.get("items_added") or 0)
+    if added:
+        parts.append(f"+{added} article" + ("s" if added > 1 else ""))
+    voices = int(delta.get("voices_added") or 0)
+    if voices:
+        parts.append(f"+{voices} source" + ("s" if voices > 1 else ""))
+    if delta.get("official_voice_joined"):
+        parts.append("une source officielle a rejoint")
+    if delta.get("newer_publication"):
+        parts.append("publication plus récente")
+    return " · ".join(parts)
+
+
+def change_section(ledger: dict | None) -> str:
+    """Editorial “what changed in the city since the last edition” — public.
+
+    Distinct from the client-side “Depuis mon repère” reading marker, which is
+    personal and article-level. This is dossier-level and identical for every
+    reader. Returns "" when no prior edition was archived, so a first edition
+    never implies a comparison that did not happen. New ≠ important; developed
+    ≠ escalation; quiet ≠ resolved. Judgment stays with the reader.
+    """
+    ledger = ledger or {}
+    if not ledger.get("has_previous"):
+        return ""
+    new = ledger.get("new") or []
+    developed = ledger.get("developed") or []
+    quiet = ledger.get("quiet") or []
+    if not (new or developed or quiet):
+        body = (
+            '<p class="no-data">Aucun dossier n’a changé depuis la dernière édition '
+            "(aucun nouveau, aucun développé, aucun retiré de la collecte). Cela ne dit "
+            "rien de la couverture ailleurs.</p>"
+        )
+    else:
+        blocks: list[str] = []
+        if new:
+            items = "".join(
+                '<li><span class="chg-tag chg-new">Nouveau</span>'
+                f'<a href="#dossiers">{esc(e.get("question") or "Dossier suivi")}</a></li>'
+                for e in new[:6]
+            )
+            blocks.append(
+                f'<div class="chg-group"><h3>Nouveaux dossiers <span class="chg-n">{len(new)}</span></h3>'
+                f'<ul class="chg-list">{items}</ul></div>'
+            )
+        if developed:
+            items = "".join(
+                '<li><span class="chg-tag chg-dev">Développé</span>'
+                f'<a href="#dossiers">{esc(e.get("question") or "Dossier suivi")}</a>'
+                f'<span class="chg-delta">{esc(_delta_text(e.get("delta")))}</span></li>'
+                for e in developed[:6]
+            )
+            blocks.append(
+                f'<div class="chg-group"><h3>Dossiers développés <span class="chg-n">{len(developed)}</span></h3>'
+                f'<ul class="chg-list">{items}</ul></div>'
+            )
+        if quiet:
+            items = "".join(
+                '<li><span class="chg-tag chg-quiet">Retiré</span>'
+                f'<span class="chg-q">{esc(e.get("question") or "Dossier suivi")}</span></li>'
+                for e in quiet[:6]
+            )
+            blocks.append(
+                f'<div class="chg-group"><h3>Disparus de cette collecte <span class="chg-n">{len(quiet)}</span></h3>'
+                f'<ul class="chg-list">{items}</ul>'
+                '<p class="fine">« Retiré » signifie absent de cette collecte, pas réglé. '
+                "Une absence n’est pas un silence éditorial prouvé.</p></div>"
+            )
+        body = "".join(blocks)
+    return (
+        '<section class="changes" id="changements" aria-labelledby="changes-title">'
+        '<div class="section-top"><div><p class="eyebrow">CE QUI A CHANGÉ</p>'
+        '<h2 id="changes-title">Depuis la dernière édition.</h2></div>'
+        '<p class="section-note">Comparaison<br>des dossiers proposés.</p></div>'
+        '<p class="dossiers-intro">Vigie compare les dossiers de cette édition à la '
+        "précédente. « Nouveau » signifie nouvellement rapproché, pas plus important. "
+        "Un rapprochement n’est pas une contradiction, et plusieurs médias ne sont pas "
+        "plusieurs confirmations indépendantes.</p>"
+        f"{body}</section>"
+    )
+
+
 def article_html(item: dict, index: int, related: list[dict]) -> str:
     title = esc(item["title"])
     geo = {"quebec-city": "Québec et environs", "quebec": "Au Québec", "linked": "Ailleurs"}.get(item["geo"], "Ailleurs")
@@ -303,7 +389,7 @@ def article_html(item: dict, index: int, related: list[dict]) -> str:
       </div></article>'''
 
 
-def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None) -> str:
+def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None) -> str:
     now = parse_date(generated_at) or datetime.now(timezone.utc)
     rows, excluded = prepare_items(ranked, now)
     run = latest_run() if run is None else run
@@ -336,6 +422,7 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 <div class="results-bar"><p id="result-count" role="status">{len(rows)} articles récents dans les flux collectés</p><button class="text-button js-only" type="button" id="reset-filters">Réinitialiser les filtres</button></div><div id="stories">{stories}{empty}</div>
 <div id="no-results" class="no-data" hidden><h3>Aucun article dans cette vue.</h3><p>Essayez un autre lieu ou élargissez le territoire. Une absence dans nos flux ne signifie pas qu’il ne se passe rien.</p><button type="button" id="empty-reset">Voir le point local</button></div>
 <div class="brief-end"><p id="end-note">Vous avez fait le tour de cette sélection.</p><button class="js-only" id="show-more" type="button">Voir les autres articles</button><span class="fine">Pas de défilement infini. Revenez quand vous en avez besoin.</span></div></section>
+{change_section(ledger)}
 {dossiers_section(issues, eligible)}
 <section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>
 <section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>

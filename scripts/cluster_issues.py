@@ -37,6 +37,7 @@ SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import change_ledger  # noqa: E402
 import ingest_rss  # noqa: E402
 
 IN_PATH = ROOT / "data" / "normalized" / "latest_enriched.json"
@@ -440,9 +441,11 @@ def main() -> None:
     pool = city_pool + province_pool
     buckets = event_buckets(pool)
     previous = []
+    previous_loaded = False
     if OUT_ISSUES.exists():
         try:
             previous = json.loads(OUT_ISSUES.read_text(encoding="utf-8")).get("issues") or []
+            previous_loaded = True
         except (OSError, ValueError, TypeError):
             pass
     used_previous = set()
@@ -565,6 +568,7 @@ def main() -> None:
     issues.sort(key=lambda x: x["issue_id"])
     issues.sort(key=lambda x: (x["evidence"].get("publication_latest") or "", x["source_count"]), reverse=True)
     issues.sort(key=lambda x: 0 if "quebec-city" in x["geo_focus"] else 1)
+    ledger = change_ledger.diff_editions(issues, previous, has_previous=previous_loaded)
     OUT_ISSUES.parent.mkdir(parents=True, exist_ok=True)
     out = {
         "clustered_at": now,
@@ -587,6 +591,7 @@ def main() -> None:
         "publication_window_days": MAX_AGE_DAYS,
         "chancellery_enabled": [s.get("id") for s in chancellery],
         "chancellery_institutions": [i["institution_id"] for i in institutions],
+        "change_ledger": ledger,
         "issues": issues,
     }
     OUT_ISSUES.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")

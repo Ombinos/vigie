@@ -36,6 +36,7 @@ The product should compete on useful understanding per minute. A resident leavin
 | A politician's name joined unrelated stories | False dispute narrative | Separate subjects and conservative event grouping |
 | Four hardcoded issues constrained discovery | New local events could not become dossiers | Generic headline grouping with strong precision limits |
 | IDs depended on source counts | Continuity broke as reporting grew | Stable identities; content-aware workbench change fingerprints |
+| Each edition was a fresh snapshot | Residents could not see what changed between visits | Change ledger diffs proposed dossiers across editions: new / developed / quiet, all `status: proposed` |
 | Source counts implied confirmation | False certainty | Explicitly unassessed contradiction and independence |
 | Claim tests rewarded mere extraction | Provenance could silently vanish | Source containment and provenance validation |
 | Unsafe/unbounded feed handling | Network and resource exposure | Public targets, pinned addresses, redirect checks, bounded bodies |
@@ -48,6 +49,8 @@ The product should compete on useful understanding per minute. A resident leavin
 
 The homepage starts with Québec and nearby places. Residents can narrow by place mention or topic, search titles and excerpts without sending queries anywhere, inspect sources, keep an article locally and explicitly record a point of reading. The return view reports newly present article URLs; it does not claim to detect changes to the world or revisions within a publisher's article.
 
+An editorial **Depuis la dernière édition** section now diffs this edition's proposed dossiers against the previous one — new, developed (more articles or voices), or quiet (absent from this collection). It is public and dossier-level, identical for every reader, and distinct from the personal reading marker above. It never claims resolution: "quiet" means absent from this collection, not fixed; "new" means newly grouped, not more important; "developed" means more articles or voices, not escalation or confirmation.
+
 Only usable publication dates in the seven days before the edition enter the brief. Six articles appear per step, with a stopping point and no infinite scroll. Saved markers do not archive publisher content; articles absent from the current collection are counted as unavailable.
 
 Official links cover municipal works, RTC information, consultations and snow-removal alerts. These are useful navigation; their data is **not** ingested or presented as a real-time warning service.
@@ -56,7 +59,7 @@ The new homepage uses local CSS/JavaScript and available fonts, with no analytic
 
 ## The next leap: a local change record
 
-The promising direction is an explainable relationship between **an event, a place, a time, a source and a possible action**. This is a product hypothesis, not a shipped capability.
+The promising direction is an explainable relationship between **an event, a place, a time, a source and a possible action**. The first slice is now shipped: a deterministic **change ledger** (`scripts/change_ledger.py`, rendered as "Depuis la dernière édition") diffs each edition's proposed dossiers against the previous one, so every persistent event carries a revision signal — new, developed, or quiet. The remaining capabilities below (authoritative change sources, durable multi-edition history per event, source-geometry geography, explicit actions and deadlines) are still a product hypothesis, not shipped.
 
 A future road-work entry should show:
 
@@ -65,7 +68,7 @@ A future road-work entry should show:
 3. When it starts and ends, including unknown or revised dates.
 4. Which source fields support the consequence, with inferred effects marked.
 5. A useful next step, such as checking the official map or route.
-6. Its revision history: added, changed, postponed, resolved or unavailable.
+6. Its revision history: added, changed, postponed, resolved or unavailable. (First slice shipped: the change ledger reports new / developed / quiet between two editions. Postponed/resolved states and a durable multi-edition history per event remain roadmap.)
 
 This requires better underlying information and durable event identity. An LLM might eventually help extract structured fields; it cannot replace source provenance, correction handling, geographic validation or measured error rates.
 
@@ -91,7 +94,7 @@ Reliable local event identity, revision history, corrections, tested geography a
 - **Relevance:** text rules remain provisional. They can miss paraphrases or overmatch names. Québec and environs includes Lévis and nearby communities; it is not a City boundary filter.
 - **Dossiers:** conservative lexical grouping misses bilingual and differently worded reports. Newsroom identity is not independent ownership/reporting.
 - **Consequences:** extracted quantities cannot reliably calculate a policy's effect on a particular resident. No such outcome should be implied.
-- **Operations:** a local/staged release is ready to serve, but no confirmed deployment target, refresh schedule, alert delivery, production monitoring or production backup service was configured here.
+- **Operations:** a local/staged release is ready to serve and the source tree is under version control. Vercel is the chosen static host and the CLI is installed, but the upload awaits an authenticated `vercel login`; no refresh schedule, alert delivery, production monitoring or production backup service was configured here.
 - **Publisher permissions:** reuse notes are in the registry. This pass did not establish commercial redistribution or image-use arrangements.
 - **Corrections:** there is no staffed correction inbox or confirmed response commitment. An original article may change without RSS reflecting the revision.
 - **Accessibility:** semantic controls, focus, reduced motion and responsive layouts are implemented; full assistive-technology auditing remains separate.

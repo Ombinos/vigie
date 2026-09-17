@@ -2418,8 +2418,11 @@ def main() -> None:
     OUT_JSON.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
     issues: list[dict] = []
+    ledger: dict = {}
     if ISSUES.exists():
-        issues = json.loads(ISSUES.read_text(encoding="utf-8")).get("issues") or []
+        issues_doc = json.loads(ISSUES.read_text(encoding="utf-8"))
+        issues = issues_doc.get("issues") or []
+        ledger = issues_doc.get("change_ledger") or {}
         print(f"issues: {len(issues)} from {ISSUES}")
 
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
@@ -2432,7 +2435,7 @@ def main() -> None:
         render_html(ranked, now.isoformat(), issues, clock), encoding="utf-8"
     )
     OUT_HTML.write_text(
-        resident_brief.render_brief(ranked, now.isoformat(), issues), encoding="utf-8"
+        resident_brief.render_brief(ranked, now.isoformat(), issues, ledger=ledger), encoding="utf-8"
     )
     near = sum(1 for c in ranked if section_for(c) == "near")
     prov = sum(1 for c in ranked if section_for(c) == "province")
