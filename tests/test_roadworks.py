@@ -31,13 +31,15 @@ SRC = {
 }
 
 
-def feature(eid="TIC-Quebec/1", *, coords=None, status="active", end="2026-10-01T03:59:59Z",
+def feature(eid="EV-001", *, coords=None, status="active", end="2026-10-01T03:59:59Z",
             impact="some-lanes-closed", roads=("Boulevard Charest Est",), desc="Réfection de la chaussée",
-            update="2026-09-17T11:00:00Z", accuracy=None, geometry="LineString"):
+            update="2026-09-17T11:00:00Z", accuracy=None, geometry="LineString",
+            etype="work-zone", no_id=False):
     if coords is None:
         coords = [[-71.21, 46.81], [-71.20, 46.81]]
     props = {
-        "data_source_id": eid, "event_type": "work-zone", "event_status": status,
+        # Feed-level on the real endpoint: identical on every feature, never an event key.
+        "data_source_id": "TIC-Quebec/1", "event_type": etype, "event_status": status,
         "vehicle_impact": impact, "road_names": list(roads), "direction": "both-directions",
         "start_date": "2026-09-10T04:00:00Z", "end_date": end,
         "description": desc, "update_date": update, "restrictions": [],
@@ -46,14 +48,17 @@ def feature(eid="TIC-Quebec/1", *, coords=None, status="active", end="2026-10-01
         props["start_date_accuracy"] = accuracy
         props["end_date_accuracy"] = accuracy
     geom = {"type": geometry, "coordinates": coords} if geometry is not None else None
-    return {"type": "Feature", "geometry": geom, "properties": props}
+    feat = {"type": "Feature", "geometry": geom, "properties": props}
+    if not no_id:
+        feat["id"] = eid
+    return feat
 
 
 def geojson(*features) -> bytes:
     return json.dumps({"type": "FeatureCollection", "features": list(features)}).encode()
 
 
-def _event(eid="TIC-Quebec/1", **over) -> dict:
+def _event(eid="EV-001", **over) -> dict:
     ev = {
         "event_id": eid, "event_type": "work-zone", "event_status": "active",
         "vehicle_impact": "some-lanes-closed", "road_names": ["Boulevard Charest Est"],
@@ -69,7 +74,7 @@ def _event(eid="TIC-Quebec/1", **over) -> dict:
 
 def _store(**over) -> dict:
     base = {
-        "method": "wzdx-roadworks-v1", "status": "proposed", "source_id": "wzdx-quebec",
+        "method": "wzdx-roadworks-v2", "status": "proposed", "source_id": "wzdx-quebec",
         "source_name": "Ville de Québec — Entraves à la circulation (WZDX)",
         "institution_name": "Ville de Québec",
         "feed_url": "https://quebec.gewi.com/wzdx/pull",
@@ -96,16 +101,27 @@ def _render(roadworks):
 
 class Parser(unittest.TestCase):
     def test_full_field_preservation(self):
-        ev, reason = ingest_wzdx.parse_event(feature("TIC-Quebec/1", accuracy="estimated"))
+        ev, reason = ingest_wzdx.parse_event(feature("ACL-20260917-EC-001", accuracy="estimated"))
         self.assertIsNone(reason)
-        self.assertEqual(ev["event_id"], "TIC-Quebec/1")
+        self.assertEqual(ev["event_id"], "ACL-20260917-EC-001")
         self.assertEqual(ev["road_names"], ["Boulevard Charest Est"])
         self.assertEqual(ev["vehicle_impact"], "some-lanes-closed")
         self.assertEqual(ev["start_date"], "2026-09-10T04:00:00Z")
         self.assertEqual(ev["start_date_accuracy"], "estimated")
         self.assertEqual(ev["end_date_accuracy"], "estimated")
 
+    def test_identity_is_feature_id_not_data_source_id(self):
+        # The real feed stamps every feature with the same feed-level
+        # data_source_id; distinct feature ids must stay distinct events.
+        ev1, r1 = ingest_wzdx.parse_event(feature("EV-A"))
+        ev2, r2 = ingest_wzdx.parse_event(feature("EV-B"))
+        self.assertIsNone(r1)
+        self.assertIsNone(r2)
+        self.assertEqual((ev1["event_id"], ev2["event_id"]), ("EV-A", "EV-B"))
+        self.assertNotIn("data_source_id", ev1)
+
     def test_missing_identifier(self):
+        self.assertEqual(ingest_wzdx.parse_event(feature(no_id=True)), (None, "missing_identifier"))
         self.assertEqual(ingest_wzdx.parse_event(feature("")), (None, "missing_identifier"))
 
     def test_null_geometry(self):
@@ -118,7 +134,7 @@ class Parser(unittest.TestCase):
     def test_point_geometry_supported(self):
         ev, reason = ingest_wzdx.parse_event(feature(coords=[-71.21, 46.81], geometry="Point"))
         self.assertIsNone(reason)
-        self.assertEqual(ev["event_id"], "TIC-Quebec/1")
+        self.assertEqual(ev["event_id"], "EV-001")
 
     def test_malformed_features(self):
         self.assertEqual(ingest_wzdx.parse_event(None), (None, "malformed"))
@@ -139,6 +155,14 @@ class ActiveStatus(unittest.TestCase):
 
     def test_no_end_no_status_stays_active(self):
         self.assertTrue(ingest_wzdx.is_active(_event(event_status=None, end_date=None), NOW))
+
+    def test_planned_and_pending_listed_until_official_end_passes(self):
+        self.assertTrue(ingest_wzdx.is_active(_event(event_status="planned"), NOW))
+        self.assertTrue(ingest_wzdx.is_active(_event(event_status="pending"), NOW))
+        self.assertFalse(ingest_wzdx.is_active(_event(event_status="planned", end_date="2026-09-01T00:00:00Z"), NOW))
+
+    def test_archived_is_inactive(self):
+        self.assertFalse(ingest_wzdx.is_active(_event(event_status="archived"), NOW))
 
 
 class DiffEvents(unittest.TestCase):
@@ -188,7 +212,8 @@ class Collect(unittest.TestCase):
             raw_dir, store_path = self._paths(temp)
             body = geojson(
                 feature("b"), feature("a"),
-                feature(""),                              # missing_identifier
+                feature("a"),                             # duplicate_identifier (feed repeats some ids)
+                feature(no_id=True),                      # missing_identifier
                 feature("c", geometry=None),              # missing_geometry
                 feature("d", coords=[[-73.57, 45.50]]),   # outside_bbox
                 feature("e", status="completed"),         # parsed, inactive
@@ -197,18 +222,31 @@ class Collect(unittest.TestCase):
                                          fetch=lambda url: (body, "application/json"))
             self.assertTrue(result["ok"])
             store = json.loads(store_path.read_text(encoding="utf-8"))
-            self.assertEqual(store["method"], "wzdx-roadworks-v1")
+            self.assertEqual(store["method"], "wzdx-roadworks-v2")
             self.assertEqual([e["event_id"] for e in store["events"]], ["a", "b"])
             c = store["counts"]
-            self.assertEqual((c["features"], c["parsed"], c["active"]), (6, 3, 2))
+            self.assertEqual((c["features"], c["parsed"], c["active"]), (7, 3, 2))
             self.assertEqual((c["missing_identifier"], c["missing_geometry"], c["outside_bbox"]), (1, 1, 1))
+            self.assertEqual(c["duplicate_identifier"], 1)
             self.assertFalse(store["diff"]["has_previous"])
             self.assertEqual(store["fetched_at"], NOW.isoformat())
             snaps = list((raw_dir / "wzdx-test").glob("*.geojson"))
             self.assertEqual(len(snaps), 1)
             meta = json.loads(snaps[0].with_suffix(".json").read_text(encoding="utf-8"))
             self.assertTrue(meta["ok"])
-            self.assertEqual(meta["feature_count"], 6)
+            self.assertEqual(meta["feature_count"], 7)
+
+    def test_previous_store_from_another_method_is_not_compared(self):
+        # An identity-model change must not masquerade as mass additions/removals.
+        with tempfile.TemporaryDirectory() as temp:
+            raw_dir, store_path = self._paths(temp)
+            legacy = _store(method="wzdx-roadworks-v1", events=[_event("legacy")])
+            store_path.parent.mkdir(parents=True)
+            store_path.write_text(json.dumps(legacy), encoding="utf-8")
+            result = ingest_wzdx.collect([SRC], NOW, raw_dir=raw_dir, store_path=store_path,
+                                         fetch=lambda url: (geojson(feature("a")), "application/json"))
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["store"]["diff"]["has_previous"])
 
     def test_diff_against_previous_store(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -355,19 +393,37 @@ class RoadworksRender(unittest.TestCase):
     def test_empty_collection_is_honest(self):
         page = _render(_store(events=[], counts={"features": 0, "parsed": 0, "active": 0}))
         self.assertIn('id="travaux"', page)
-        self.assertIn("Aucune entrave active dans cette collecte", page)
+        self.assertIn("Aucune entrave déclarée dans cette collecte", page)
 
     def test_display_cap_and_more_line(self):
         events = [_event(f"e{n:02d}") for n in range(12)]
         page = _render(_store(events=events))
         self.assertEqual(page.count('<li class="rw-item'), 8)
-        self.assertIn("+ 4 autres entraves actives", page)
+        self.assertIn("+ 4 autres entraves déclarées", page)
 
     def test_severity_ordering(self):
         events = [_event("calm", vehicle_impact="no-lanes-closed"),
                   _event("hard", vehicle_impact="all-lanes-closed")]
         page = _render(_store(events=events))
-        self.assertLess(page.index("rw-sev-0"), page.index("rw-sev-4"))
+        self.assertLess(page.index("rw-sev-0"), page.index("rw-sev-5"))
+
+    def test_planned_and_pending_carry_the_city_status_label(self):
+        page = _render(_store(events=[_event("p1", event_status="planned"),
+                                      _event("p2", event_status="pending")]))
+        self.assertIn("Planifiée", page)
+        self.assertIn("En attente", page)
+
+    def test_active_status_gets_no_badge(self):
+        page = _render(_store())
+        self.assertNotIn("Planifiée", page)
+        self.assertNotIn("En attente", page)
+
+    def test_detour_and_alternating_traffic_labels(self):
+        page = _render(_store(events=[_event("d1", event_type="detour",
+                                             vehicle_impact="alternating-one-way")]))
+        self.assertIn("Détour", page)
+        self.assertIn("Circulation en alternance", page)
+        self.assertIn("rw-sev-2", page)
 
     def test_xss_escaped(self):
         page = _render(_store(events=[_event(
@@ -396,7 +452,7 @@ class RoadworksRender(unittest.TestCase):
         self.assertIn("dates estimées par la Ville", page)
 
     def test_change_tags_only_with_previous_collection(self):
-        diff = {"has_previous": True, "new": [{"event_id": "TIC-Quebec/1"}], "changed": [],
+        diff = {"has_previous": True, "new": [{"event_id": "EV-001"}], "changed": [],
                 "removed": [], "new_count": 1, "removed_count": 0, "changed_count": 0}
         self.assertIn("rw-t-new", _render(_store(diff=diff)))
         silent = dict(diff, has_previous=False)

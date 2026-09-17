@@ -2,10 +2,16 @@
 
 Structured official change data, not articles: this bypasses normalize/enrich/
 cluster/rank entirely. Raw GeoJSON snapshots are append-only (fetch is the scar).
-The store keeps parsed active events inside the metro bbox plus an honest
-collection diff — removal from a collection is never reported as ended or
-resolved, and estimated dates stay marked estimated. A feed outage never kills
-the news pipeline: on failure the previous store is kept and this exits 0.
+The store keeps parsed events inside the metro bbox plus an honest collection
+diff — removal from a collection is never reported as ended or resolved, and
+estimated dates stay marked estimated. A feed outage never kills the news
+pipeline: on failure the previous store is kept and this exits 0.
+
+Event identity is the GeoJSON feature-level `id` (e.g. "ACL-20260917-EC-001"),
+verified stable across collections. The WZDX `data_source_id` property is
+feed-level on this endpoint ("TIC-Quebec/1" on every feature) and is never used
+as an event key. Duplicate feature ids inside one collection are counted and
+deduplicated (first occurrence in feed order wins).
 
 Stdlib only. No pip. Does not invent, rank, or interpret anything.
 """
@@ -23,7 +29,7 @@ from ingest_rss import SOURCES_PATH, fetch_bytes, load_enabled_by_type, sha256_h
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw"
 STORE_PATH = ROOT / "data" / "roadworks" / "latest_roadworks.json"
-METHOD = "wzdx-roadworks-v1"
+METHOD = "wzdx-roadworks-v2"
 # Quebec metro bbox (min_lon, min_lat, max_lon, max_lat) — a locality sanity
 # guard on the feed, not an editorial filter. The feed is the city's own.
 METRO_BBOX = (-71.85, 46.50, -70.75, 47.25)
@@ -31,8 +37,8 @@ COMPARE_FIELDS = (
     "event_status", "vehicle_impact", "start_date", "end_date",
     "description", "road_names", "restrictions",
 )
-ENDED_STATUSES = ("completed", "cancelled")
-SKIP_REASONS = ("malformed", "missing_identifier", "missing_geometry", "outside_bbox")
+ENDED_STATUSES = ("completed", "cancelled", "archived")
+SKIP_REASONS = ("malformed", "missing_identifier", "missing_geometry", "outside_bbox", "duplicate_identifier")
 
 
 def _parse_iso(raw: object) -> datetime | None:
@@ -88,11 +94,15 @@ def _clean_str(value: object) -> str | None:
 
 
 def parse_event(feature: object) -> tuple[dict | None, str | None]:
-    """One WZDX feature -> (event, None) or (None, skip reason). Never invents fields."""
+    """One WZDX feature -> (event, None) or (None, skip reason). Never invents fields.
+
+    Identity is the GeoJSON feature-level `id`. The `data_source_id` property is
+    feed-level on this endpoint and must never be used as an event key.
+    """
     if not isinstance(feature, dict) or not isinstance(feature.get("properties"), dict):
         return None, "malformed"
     props = feature["properties"]
-    event_id = str(props.get("data_source_id") or "").strip()
+    event_id = str(feature.get("id") or "").strip()
     if not event_id:
         return None, "missing_identifier"
     points = _points(feature.get("geometry"))
@@ -119,10 +129,13 @@ def parse_event(feature: object) -> tuple[dict | None, str | None]:
 
 
 def is_active(event: dict, now: datetime) -> bool:
-    """Official status wins; otherwise the official end date decides.
+    """Listed while the city still declares it and the official window is open.
 
-    A real-time obstruction feed with no status and no end date is active:
-    the city is still publishing it. Fetch time is never an event time.
+    Official status wins for ended events; `planned`/`pending` declarations stay
+    listed until their official end date passes, and the brief relays the City's
+    own status label rather than reinterpreting it. No status and no end date on
+    a real-time feed means the city is still publishing it. Fetch time is never
+    an event time.
     """
     status = str(event.get("event_status") or "").lower()
     if status == "active":
@@ -173,13 +186,17 @@ def diff_events(current: list[dict], previous: list[dict] | None, *, now: dateti
     }
 
 
-def load_previous(store_path: Path) -> list[dict] | None:
-    """Previous store events, or None when absent/corrupt (no comparison claimed)."""
+def load_previous(store_path: Path, method: str = METHOD) -> list[dict] | None:
+    """Previous store events, or None when absent/corrupt/from another identity
+    model. A store built under a different METHOD is never compared against:
+    an identity change must not masquerade as mass additions and removals."""
     try:
         doc = json.loads(store_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    events = doc.get("events") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or doc.get("method") != method:
+        return None
+    events = doc.get("events")
     return events if isinstance(events, list) else None
 
 
@@ -230,6 +247,7 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
     previous = load_previous(store_path)
     counts = {"features": 0, "parsed": 0, **{reason: 0 for reason in SKIP_REASONS}}
     all_events: list[dict] = []
+    seen_ids: set[str] = set()
     fetched_ats: list[datetime] = []
     for src in sources:
         source_id = str(src.get("id") or "")
@@ -292,6 +310,12 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
             if event is None:
                 counts[reason or "malformed"] += 1
                 continue
+            if event["event_id"] in seen_ids:
+                # The feed repeats a few ids within one collection; first
+                # occurrence in feed order wins, the drop is counted, never silent.
+                counts["duplicate_identifier"] += 1
+                continue
+            seen_ids.add(event["event_id"])
             event["source_id"] = source_id
             event["active"] = is_active(event, fetched_at)
             all_events.append(event)

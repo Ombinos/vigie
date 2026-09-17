@@ -367,6 +367,7 @@ def change_section(ledger: dict | None) -> str:
 RW_IMPACT_LABELS = {
     "all-lanes-closed": "Toutes les voies fermées",
     "some-lanes-closed": "Voies partiellement fermées",
+    "alternating-one-way": "Circulation en alternance",
     "some-lanes-closed-intermittent-or-short-duration": "Fermetures intermittentes ou de courte durée",
     "all-lanes-open": "Toutes les voies ouvertes",
     "no-lanes-closed": "Aucune voie fermée",
@@ -378,13 +379,17 @@ RW_DIRECTION_LABELS = {
     "both-directions": "deux directions",
 }
 RW_EVENT_TYPE_LABELS = {
-    "road-work": "Travaux", "work-zone": "Zone de travaux", "incident": "Incident",
-    "accident": "Accident", "event": "Événement",
+    "road-work": "Travaux", "work-zone": "Zone de travaux", "detour": "Détour",
+    "incident": "Incident", "accident": "Accident", "event": "Événement",
 }
+# The City's own status vocabulary, relayed literally. "active" needs no badge;
+# planned/pending declarations are labeled so a future window is never presented
+# as a current closure.
+RW_STATUS_LABELS = {"planned": "Planifiée", "pending": "En attente"}
 RW_SEVERITY = {
-    "all-lanes-closed": 0, "some-lanes-closed": 1,
-    "some-lanes-closed-intermittent-or-short-duration": 2,
-    "all-lanes-open": 3, "no-lanes-closed": 4,
+    "all-lanes-closed": 0, "some-lanes-closed": 1, "alternating-one-way": 2,
+    "some-lanes-closed-intermittent-or-short-duration": 3,
+    "all-lanes-open": 4, "no-lanes-closed": 5,
 }
 RW_DISPLAY_CAP = 8
 RW_MAP_URL = "https://carte.ville.quebec.qc.ca/"
@@ -413,9 +418,10 @@ def _rw_dates(event: dict) -> str:
 def _rw_card(event: dict, new_ids: set, changed_ids: set, has_previous: bool) -> str:
     eid = str(event.get("event_id"))
     impact = str(event.get("vehicle_impact") or "")
-    severity = RW_SEVERITY.get(impact, 5)
+    severity = RW_SEVERITY.get(impact, 6)
     kicker = [
         label for label in (
+            RW_STATUS_LABELS.get(str(event.get("event_status") or "")),
             RW_EVENT_TYPE_LABELS.get(str(event.get("event_type") or "")),
             RW_IMPACT_LABELS.get(impact),
             RW_DIRECTION_LABELS.get(str(event.get("direction") or "")),
@@ -459,21 +465,21 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
     # Stable three-pass sort: severity first, then most recently updated, then id.
     ordered = sorted(events, key=lambda e: str(e.get("event_id")))
     ordered.sort(key=lambda e: str(e.get("update_date") or ""), reverse=True)
-    ordered.sort(key=lambda e: RW_SEVERITY.get(str(e.get("vehicle_impact") or ""), 5))
+    ordered.sort(key=lambda e: RW_SEVERITY.get(str(e.get("vehicle_impact") or ""), 6))
     new_ids = {e.get("event_id") for e in (diff.get("new") or []) if isinstance(e, dict)}
     changed_ids = {e.get("event_id") for e in (diff.get("changed") or []) if isinstance(e, dict)}
     cards = "".join(_rw_card(e, new_ids, changed_ids, has_previous) for e in ordered[:RW_DISPLAY_CAP])
     count = len(ordered)
-    count_note = f"{count} entrave active<br>du flux officiel." if count == 1 else f"{count} entraves actives<br>du flux officiel."
+    count_note = f"{count} entrave déclarée<br>du flux officiel." if count == 1 else f"{count} entraves déclarées<br>du flux officiel."
     if ordered:
         listing = f'<ul class="rw-list">{cards}</ul>'
         more = (
-            f'<p class="rw-more">+ {count - RW_DISPLAY_CAP} autres entraves actives dans cette collecte.</p>'
+            f'<p class="rw-more">+ {count - RW_DISPLAY_CAP} autres entraves déclarées dans cette collecte.</p>'
             if count > RW_DISPLAY_CAP else ""
         )
     else:
         listing = (
-            '<p class="no-data">Aucune entrave active dans cette collecte. Cela ne signifie '
+            '<p class="no-data">Aucune entrave déclarée dans cette collecte. Cela ne signifie '
             "pas qu’aucun travail n’a lieu ailleurs sur le réseau.</p>"
         )
         more = ""
