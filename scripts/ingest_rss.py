@@ -65,7 +65,7 @@ def _scalar(val: str):
     return val
 
 
-def load_enabled_rss(path: Path) -> list[dict]:
+def load_enabled_by_type(path: Path, source_type: str) -> list[dict]:
     """Minimal parser for our sources.yaml list-of-maps. Not a general YAML engine."""
     text = path.read_text(encoding="utf-8")
     m = re.search(r"(?ms)^sources:\n(.*?)(?=^[a-zA-Z].*:|\Z)", text)
@@ -89,9 +89,13 @@ def load_enabled_rss(path: Path) -> list[dict]:
                 line = line[2:]
             key, _, val = line.partition(":")
             rec[key.strip()] = _scalar(val)
-        if rec.get("enabled") is True and rec.get("type") == "rss" and rec.get("id") and rec.get("url"):
+        if rec.get("enabled") is True and rec.get("type") == source_type and rec.get("id") and rec.get("url"):
             out.append(rec)
     return out
+
+
+def load_enabled_rss(path: Path) -> list[dict]:
+    return load_enabled_by_type(path, "rss")
 
 
 def public_http_url(url: str, *, resolve: bool = False) -> str:

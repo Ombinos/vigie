@@ -43,3 +43,28 @@
 .chg-q{color:var(--muted)}
 @media(max-width:600px){.changes{padding-top:26px}.chg-group h3{font-size:17px}.chg-list a,.chg-q{font-size:13px}.chg-list li{gap:7px}}
 @media print{.changes{padding-bottom:0}.chg-list a:after{content:' (' attr(href) ')';font:9px var(--sans);overflow-wrap:anywhere}}
+.roadworks{border-top:1px solid var(--ink);padding-top:32px;padding-bottom:8px}
+.rw-list{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.rw-item{padding:13px 0 13px 13px;border-bottom:1px solid var(--line);border-left:3px solid var(--line)}
+.rw-sev-0{border-left-color:#7a2e1d}
+.rw-sev-1{border-left-color:#a8541f}
+.rw-sev-2{border-left-color:var(--blue)}
+.rw-head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.rw-roads{font-family:var(--serif);font-size:17px;letter-spacing:-.3px}
+.rw-tag{font-size:9px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;border-radius:3px;padding:3px 7px;white-space:nowrap}
+.rw-t-new{color:#fff;background:var(--accent)}
+.rw-t-chg{color:var(--accent);background:var(--light)}
+.rw-kicker{font-size:11px;font-weight:650;letter-spacing:.4px;text-transform:uppercase;color:var(--blue);margin:5px 0 0}
+.rw-dates{font-size:12px;color:var(--muted);margin:4px 0 0}
+.rw-dates time{color:var(--blue);font-weight:600}
+.rw-desc{font-size:13px;line-height:1.55;margin:5px 0 0}
+.rw-changes{font-size:12px;color:var(--blue);font-weight:600;margin:0 0 14px}
+.rw-more{font-size:13px;color:var(--muted);margin:12px 0 0}
+.rw-stale{font-size:13px;font-weight:600;color:#7a2e1d;margin:12px 0 0}
+.rw-map{margin:16px 0 0;font-size:13px;font-weight:600}
+.rw-map a{color:var(--accent)}
+.rw-map a:hover{text-decoration:underline}
+.rw-attr{margin:10px 0 0}
+.rw-attr a{color:var(--blue);text-decoration:underline;text-underline-offset:3px}
+@media(max-width:600px){.roadworks{padding-top:26px}.rw-roads{font-size:15px}.rw-item{padding-left:10px}}
+@media print{.roadworks{padding-bottom:0}.rw-map a:after,.rw-attr a:after{content:' (' attr(href) ')';font:9px var(--sans);overflow-wrap:anywhere}}

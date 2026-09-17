@@ -30,7 +30,7 @@ Verification stages a complete release in `deploy/public/`, checks links and ass
 
 ## Product surfaces
 
-- `/`: French resident brief. Six articles per step, source excerpts, comparisons, place/topic/search filters, saved articles and an explicit reading marker.
+- `/`: French resident brief. Six articles per step, source excerpts, comparisons, place/topic/search filters, saved articles and an explicit reading marker. Two honest change surfaces: “Travaux et entraves” (official WZDX roadwork data, attributed, never ranked with articles) and “Depuis la dernière édition” (dossier-level edition diff, shown only when a prior edition exists).
 - `/explorer.html`: older experimental evidence workbench, retained for inspection with explicit limitations.
 - `/morning.html`: experimental dossier companion from the same issue store.
 
@@ -50,9 +50,9 @@ Read [PRODUCT_AUDIT.md](PRODUCT_AUDIT.md) for the co-founder assessment, impleme
 
 ## Pipe
 
-ingest → normalize → enrich (proposed) → cluster dossiers → rank → resident brief + explorer + morning
+ingest (RSS + official WZDX roadworks) → normalize → enrich (proposed) → cluster dossiers → rank → resident brief + explorer + morning
 
-Classifications and dossiers are provisional. Named institutions do not prove independent ownership or reporting. Publication, collection, grouping and build time remain distinct.
+Classifications and dossiers are provisional. Named institutions do not prove independent ownership or reporting. Publication, collection, grouping and build time remain distinct. WZDX roadwork data is structured official change data, not articles: it bypasses normalize/enrich/cluster/rank, renders in its own finite brief section with attribution and collection diffs, and a feed outage never blocks the news pipeline. Removed from a collection is never reported as ended or resolved.
 
 Source files and `public/assets/` are authoritative. Data snapshots, generated HTML, deployment output, caches and historical patch logs are excluded from version control.
 

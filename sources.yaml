@@ -2,7 +2,7 @@
 # Niche: Quebec City. Nest: city → province → linked world.
 # Rule: every source is named. Cuts are logged. No single court owns the fog.
 # Voice = institution (not RSS feed). Sister feeds share one institution_id.
-# Last updated: 2026-09-16
+# Last updated: 2026-09-17
 # Owner: Onesphore Ombinos + co-founders
 
 version: 1
@@ -80,6 +80,22 @@ sources:
     enabled: true
     enabled_at: 2026-09-16
     license_note: Public municipal information; verify reuse terms for commercial products.
+
+  - id: wzdx-quebec
+    name: Ville de Québec — Entraves à la circulation (WZDX)
+    institution: ville-quebec
+    institution_name: Ville de Québec
+    language: fr
+    geo: quebec-city
+    nest_role: primary
+    source_kind: official
+    type: wzdx
+    url: https://quebec.gewi.com/wzdx/pull
+    homepage: https://www.donneesquebec.ca/recherche/dataset/entraves-a-la-circulation-en-temps-reel-de-la-ville-de-quebec
+    notes: Real-time WZDX GeoJSON of road obstructions, probed 2026-09-17 (902 features, continuous updates). Not RSS - outside the 12-feed RSS ceiling, invisible to the article pipeline and the silence map; rendered in the dedicated Travaux-et-entraves brief section with attribution, source timestamps, collection diffs and the official map link.
+    enabled: true
+    enabled_at: 2026-09-17
+    license_note: CC-BY 4.0 - attribution required (Ville de Québec, Entraves à la circulation en temps réel, via Données Québec).
 
   # --- Province (Quebec) ---
   - id: le-devoir
@@ -223,3 +239,9 @@ rules:
     independent (Le Devoir), Montreal major (La Presse), plus official primary documents
     (Ville, Gouv QC, Hydro). 12 enabled RSS = ceiling; fewer institutions when sister feeds
     share one voice (CBC, Radio-Canada). Not perfect balance — publish; adjust with scars.
+  official_change_feeds: >
+    Non-RSS official feeds (type: wzdx, ...) are structured change data, not articles.
+    They never enter the article pipeline, the RSS ceiling, the ranking, or the silence
+    map. They render in dedicated finite brief sections with attribution, source
+    timestamps, collection diffs, and links to the official service. Removed from a
+    collection is never reported as ended or resolved.

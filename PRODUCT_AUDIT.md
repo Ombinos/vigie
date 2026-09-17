@@ -37,6 +37,7 @@ The product should compete on useful understanding per minute. A resident leavin
 | Four hardcoded issues constrained discovery | New local events could not become dossiers | Generic headline grouping with strong precision limits |
 | IDs depended on source counts | Continuity broke as reporting grew | Stable identities; content-aware workbench change fingerprints |
 | Each edition was a fresh snapshot | Residents could not see what changed between visits | Change ledger diffs proposed dossiers across editions: new / developed / quiet, all `status: proposed` |
+| Official real-time change data was link-out only | Residents left the brief to learn what blocks their street | WZDX road-obstruction feed ingested as structured data: attributed finite section, source timestamps, collection diffs, official map as next step |
 | Source counts implied confirmation | False certainty | Explicitly unassessed contradiction and independence |
 | Claim tests rewarded mere extraction | Provenance could silently vanish | Source containment and provenance validation |
 | Unsafe/unbounded feed handling | Network and resource exposure | Public targets, pinned addresses, redirect checks, bounded bodies |
@@ -53,22 +54,24 @@ An editorial **Depuis la dernière édition** section now diffs this edition's p
 
 Only usable publication dates in the seven days before the edition enter the brief. Six articles appear per step, with a stopping point and no infinite scroll. Saved markers do not archive publisher content; articles absent from the current collection are counted as unavailable.
 
-Official links cover municipal works, RTC information, consultations and snow-removal alerts. These are useful navigation; their data is **not** ingested or presented as a real-time warning service.
+A **Travaux et entraves** section now relays the Ville's official WZDX road-obstruction feed as structured data: finite list (most severe first, capped at eight with an explicit "+ N others" count), original French wording, official start/end dates with the City's own "estimated" marks preserved, per-collection diff tags (new/changed), CC-BY attribution with the collection timestamp, and the official works map as the next step. It is not ranked with articles, computes no personal-route effect, and is not an alert service: a collection older than six hours says so. Removed from a collection is never presented as ended.
+
+Other official links cover RTC information, consultations and snow-removal alerts. These remain useful navigation; their data is **not** ingested or presented as a real-time warning service.
 
 The new homepage uses local CSS/JavaScript and available fonts, with no analytics or location request. Source reading and disclosures remain usable without JavaScript. The older workbench can still load external fonts and publisher thumbnails; it has a different privacy surface and remains experimental.
 
 ## The next leap: a local change record
 
-The promising direction is an explainable relationship between **an event, a place, a time, a source and a possible action**. The first slice is now shipped: a deterministic **change ledger** (`scripts/change_ledger.py`, rendered as "Depuis la dernière édition") diffs each edition's proposed dossiers against the previous one, so every persistent event carries a revision signal — new, developed, or quiet. The remaining capabilities below (authoritative change sources, durable multi-edition history per event, source-geometry geography, explicit actions and deadlines) are still a product hypothesis, not shipped.
+The promising direction is an explainable relationship between **an event, a place, a time, a source and a possible action**. Two slices are now shipped: a deterministic **change ledger** (`scripts/change_ledger.py`, rendered as "Depuis la dernière édition") diffs each edition's proposed dossiers against the previous one, so every persistent event carries a revision signal — new, developed, or quiet; and the **first authoritative change source** (`scripts/ingest_wzdx.py`, rendered as "Travaux et entraves") relays the Ville's official WZDX road-obstruction feed with source geometry as a locality guard, official dates, and per-collection diffs. The remaining capabilities below (durable multi-edition history per event, rendered source geography, explicit actions and deadlines, postponed/resolved states) are still a product hypothesis, not shipped.
 
-A future road-work entry should show:
+A road-work entry now shows (shipped state of the original six-point specification):
 
-1. What the official source says changed, with original wording and update time.
-2. Where it applies, using source coordinates or a documented boundary.
-3. When it starts and ends, including unknown or revised dates.
-4. Which source fields support the consequence, with inferred effects marked.
-5. A useful next step, such as checking the official map or route.
-6. Its revision history: added, changed, postponed, resolved or unavailable. (First slice shipped: the change ledger reports new / developed / quiet between two editions. Postponed/resolved states and a durable multi-edition history per event remain roadmap.)
+1. What the official source says changed, with original wording. (Shipped: the City's French `description` is relayed verbatim; `update_date` orders the list but is not yet displayed.)
+2. Where it applies, using source coordinates or a documented boundary. (Partial: coordinates gate a documented metro bbox and street names are relayed; geography is not yet rendered on a map — the official map link is the next step.)
+3. When it starts and ends, including unknown or revised dates. (Shipped: official start/end with the City's "estimated" accuracy marks preserved; missing dates render as "Date non précisée".)
+4. Which source fields support the consequence, with inferred effects marked. (Partial: status, impact, direction and restrictions are stored per event; nothing is inferred, and no personal consequence is ever computed.)
+5. A useful next step, such as checking the official map or route. (Shipped: the official works map, plus the dataset link for verification.)
+6. Its revision history: added, changed, postponed, resolved or unavailable. (First slices shipped: the change ledger reports new / developed / quiet between editions; the roadworks diff reports new / changed / removed between collections, with "removed" never meaning ended. Postponed/resolved states and a durable multi-edition history per event remain roadmap.)
 
 This requires better underlying information and durable event identity. An LLM might eventually help extract structured fields; it cannot replace source provenance, correction handling, geographic validation or measured error rates.
 
@@ -76,9 +79,9 @@ This requires better underlying information and durable event identity. An LLM m
 
 Start with one recurring job: **will something change my usual trip?** Validate with a small group of Québec residents who repeatedly travel the same corridors. Record useful discoveries and false alarms with their permission; do not add hidden behavioral tracking.
 
-The Ville publishes an official [WZDX road-obstruction dataset](https://www.donneesquebec.ca/recherche/dataset/entraves-a-la-circulation-en-temps-reel-de-la-ville-de-quebec). The registry describes spatial road-work information, a real-time update frequency and CC-BY 4.0 attribution. Actual endpoint behavior, field completeness and operational uptime still need engineering verification before integration. The [RTC information page](https://www.rtcquebec.ca/restez-informe) provides official route/alert context; actual API availability and conditions must be checked before promising integration.
+The Ville publishes an official [WZDX road-obstruction dataset](https://www.donneesquebec.ca/recherche/dataset/entraves-a-la-circulation-en-temps-reel-de-la-ville-de-quebec). Engineering verification is done and the source is integrated: the endpoint (`https://quebec.gewi.com/wzdx/pull`) served 904 GeoJSON features on 2026-09-17 with stable `data_source_id` identifiers, official start/end dates with accuracy marks, French descriptions and lane-level impact; 902 parsed inside the metro bbox (2 null geometries skipped and counted). It renders in the brief's "Travaux et entraves" section under CC-BY 4.0 attribution. Operational uptime remains unverified over time; a feed outage keeps the previous store, prints the failure and never blocks the news pipeline. The [RTC information page](https://www.rtcquebec.ca/restez-informe) provides official route/alert context; actual API availability and conditions must still be checked before promising integration.
 
-Progress from one official change source to reliable revision history, then explicit saved places/corridors. Avoid requiring a home address. “We could not check this route” must be as clear as “a change was reported.”
+The first official change source is shipped; next are reliable multi-edition revision history, then explicit saved places/corridors. Avoid requiring a home address. “We could not check this route” must be as clear as “a change was reported.” The resident validation loop (small group of repeated-corridor travelers, recorded discoveries and false alarms) has not started.
 
 ### Second experiment: decisions before deadlines
 
@@ -94,7 +97,7 @@ Reliable local event identity, revision history, corrections, tested geography a
 - **Relevance:** text rules remain provisional. They can miss paraphrases or overmatch names. Québec and environs includes Lévis and nearby communities; it is not a City boundary filter.
 - **Dossiers:** conservative lexical grouping misses bilingual and differently worded reports. Newsroom identity is not independent ownership/reporting.
 - **Consequences:** extracted quantities cannot reliably calculate a policy's effect on a particular resident. No such outcome should be implied.
-- **Operations:** a local/staged release is ready to serve and the source tree is under version control. Vercel is the chosen static host and the CLI is installed, but the upload awaits an authenticated `vercel login`; no refresh schedule, alert delivery, production monitoring or production backup service was configured here.
+- **Operations:** a local/staged release is ready to serve and the source tree is under version control (two feature commits plus this integration). Vercel is the chosen static host, the CLI is installed and authenticated, but `vercel link` reports the account is suspended pending a valid payment method — the first upload is blocked on that billing step, not on the release. No refresh schedule, alert delivery, production monitoring or production backup service was configured here.
 - **Publisher permissions:** reuse notes are in the registry. This pass did not establish commercial redistribution or image-use arrangements.
 - **Corrections:** there is no staffed correction inbox or confirmed response commitment. An original article may change without RSS reflecting the revision.
 - **Accessibility:** semantic controls, focus, reduced motion and responsive layouts are implemented; full assistive-technology auditing remains separate.

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CANDIDATES = ROOT / "data" / "normalized" / "latest_candidates.json"
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
 ISSUES = ROOT / "data" / "issues" / "latest_issues.json"
+ROADWORKS = ROOT / "data" / "roadworks" / "latest_roadworks.json"
 FACES = ROOT / "data" / "media" / "latest_faces.json"
 OUT_JSON = ROOT / "data" / "normalized" / "latest_ranked.json"
 OUT_HTML = ROOT / "public" / "index.html"
@@ -2425,6 +2426,18 @@ def main() -> None:
         ledger = issues_doc.get("change_ledger") or {}
         print(f"issues: {len(issues)} from {ISSUES}")
 
+    # Official roadworks store: structured change data, never ranked with articles.
+    # A missing or corrupt store renders no section rather than failing the edition.
+    roadworks: dict = {}
+    if ROADWORKS.exists():
+        try:
+            loaded = json.loads(ROADWORKS.read_text(encoding="utf-8"))
+            roadworks = loaded if isinstance(loaded, dict) else {}
+        except ValueError:
+            roadworks = {}
+        if roadworks:
+            print(f"roadworks: {len(roadworks.get('events') or [])} active events from {ROADWORKS}")
+
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
     clock = load_clock(now.isoformat())
     # Keep the experimental evidence workbench accessible without making
@@ -2435,7 +2448,8 @@ def main() -> None:
         render_html(ranked, now.isoformat(), issues, clock), encoding="utf-8"
     )
     OUT_HTML.write_text(
-        resident_brief.render_brief(ranked, now.isoformat(), issues, ledger=ledger), encoding="utf-8"
+        resident_brief.render_brief(ranked, now.isoformat(), issues, ledger=ledger, roadworks=roadworks),
+        encoding="utf-8",
     )
     near = sum(1 for c in ranked if section_for(c) == "near")
     prov = sum(1 for c in ranked if section_for(c) == "province")

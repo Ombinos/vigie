@@ -364,6 +364,160 @@ def change_section(ledger: dict | None) -> str:
     )
 
 
+RW_IMPACT_LABELS = {
+    "all-lanes-closed": "Toutes les voies fermées",
+    "some-lanes-closed": "Voies partiellement fermées",
+    "some-lanes-closed-intermittent-or-short-duration": "Fermetures intermittentes ou de courte durée",
+    "all-lanes-open": "Toutes les voies ouvertes",
+    "no-lanes-closed": "Aucune voie fermée",
+    "unknown": "Impact non précisé",
+}
+RW_DIRECTION_LABELS = {
+    "northbound": "direction nord", "southbound": "direction sud",
+    "eastbound": "direction est", "westbound": "direction ouest",
+    "both-directions": "deux directions",
+}
+RW_EVENT_TYPE_LABELS = {
+    "road-work": "Travaux", "work-zone": "Zone de travaux", "incident": "Incident",
+    "accident": "Accident", "event": "Événement",
+}
+RW_SEVERITY = {
+    "all-lanes-closed": 0, "some-lanes-closed": 1,
+    "some-lanes-closed-intermittent-or-short-duration": 2,
+    "all-lanes-open": 3, "no-lanes-closed": 4,
+}
+RW_DISPLAY_CAP = 8
+RW_MAP_URL = "https://carte.ville.quebec.qc.ca/"
+
+
+def _rw_places(event: dict) -> str:
+    roads = [str(r).strip() for r in (event.get("road_names") or []) if str(r or "").strip()]
+    return " · ".join(roads[:3])
+
+
+def _rw_dates(event: dict) -> str:
+    start, end = event.get("start_date"), event.get("end_date")
+    estimated = "estimated" in (
+        str(event.get("start_date_accuracy") or ""), str(event.get("end_date_accuracy") or "")
+    )
+    note = ' <span class="fine">(dates estimées par la Ville)</span>' if estimated else ""
+    if start and end:
+        return f'<p class="rw-dates">Du {date_html(start)} au {date_html(end)}{note}</p>'
+    if start:
+        return f'<p class="rw-dates">Depuis le {date_html(start)}{note}</p>'
+    if end:
+        return f'<p class="rw-dates">Jusqu’au {date_html(end)}{note}</p>'
+    return ""
+
+
+def _rw_card(event: dict, new_ids: set, changed_ids: set, has_previous: bool) -> str:
+    eid = str(event.get("event_id"))
+    impact = str(event.get("vehicle_impact") or "")
+    severity = RW_SEVERITY.get(impact, 5)
+    kicker = [
+        label for label in (
+            RW_EVENT_TYPE_LABELS.get(str(event.get("event_type") or "")),
+            RW_IMPACT_LABELS.get(impact),
+            RW_DIRECTION_LABELS.get(str(event.get("direction") or "")),
+        ) if label
+    ]
+    tags = ""
+    if has_previous:
+        if eid in new_ids:
+            tags += '<span class="rw-tag rw-t-new">Nouvelle</span>'
+        if eid in changed_ids:
+            tags += '<span class="rw-tag rw-t-chg">Modifiée</span>'
+    kicker_html = f'<p class="rw-kicker">{" · ".join(esc(k) for k in kicker)}</p>' if kicker else ""
+    desc = plain(event.get("description"))
+    if len(desc) > 200:
+        desc = desc[:200].rsplit(" ", 1)[0] + "…"
+    desc_html = f'<p class="rw-desc">{esc(desc)}</p>' if desc else ""
+    return (
+        f'<li class="rw-item rw-sev-{severity}">'
+        f'<div class="rw-head">{tags}<span class="rw-roads">{esc(_rw_places(event) or "Lieu non précisé")}</span></div>'
+        f"{kicker_html}{_rw_dates(event)}{desc_html}</li>"
+    )
+
+
+def roadworks_section(rw: dict | None, now: datetime) -> str:
+    """Official road obstructions — structured change data, never articles.
+
+    Renders only when a store exists with a parseable collection timestamp, so
+    the section never implies data that was not collected. Removed ≠ ended;
+    estimated dates stay marked estimated; no personal-route effect is ever
+    computed. Judgment stays with the reader, on the official map.
+    """
+    rw = rw if isinstance(rw, dict) else {}
+    events = rw.get("events")
+    fetched = parse_date(rw.get("fetched_at"))
+    if not isinstance(events, list) or fetched is None:
+        return ""
+    events = [e for e in events if isinstance(e, dict) and e.get("event_id")]
+    diff = rw.get("diff") if isinstance(rw.get("diff"), dict) else {}
+    has_previous = bool(diff.get("has_previous"))
+    stale = (now - fetched).total_seconds() > 6 * 3600 or (now - fetched).total_seconds() < -300
+    # Stable three-pass sort: severity first, then most recently updated, then id.
+    ordered = sorted(events, key=lambda e: str(e.get("event_id")))
+    ordered.sort(key=lambda e: str(e.get("update_date") or ""), reverse=True)
+    ordered.sort(key=lambda e: RW_SEVERITY.get(str(e.get("vehicle_impact") or ""), 5))
+    new_ids = {e.get("event_id") for e in (diff.get("new") or []) if isinstance(e, dict)}
+    changed_ids = {e.get("event_id") for e in (diff.get("changed") or []) if isinstance(e, dict)}
+    cards = "".join(_rw_card(e, new_ids, changed_ids, has_previous) for e in ordered[:RW_DISPLAY_CAP])
+    count = len(ordered)
+    count_note = f"{count} entrave active<br>du flux officiel." if count == 1 else f"{count} entraves actives<br>du flux officiel."
+    if ordered:
+        listing = f'<ul class="rw-list">{cards}</ul>'
+        more = (
+            f'<p class="rw-more">+ {count - RW_DISPLAY_CAP} autres entraves actives dans cette collecte.</p>'
+            if count > RW_DISPLAY_CAP else ""
+        )
+    else:
+        listing = (
+            '<p class="no-data">Aucune entrave active dans cette collecte. Cela ne signifie '
+            "pas qu’aucun travail n’a lieu ailleurs sur le réseau.</p>"
+        )
+        more = ""
+    changes = ""
+    if has_previous:
+        bits = []
+        if diff.get("new_count"):
+            bits.append(f'+{int(diff["new_count"])} nouvelle' + ("s" if int(diff["new_count"]) > 1 else ""))
+        if diff.get("changed_count"):
+            bits.append(f'~{int(diff["changed_count"])} modifiée' + ("s" if int(diff["changed_count"]) > 1 else ""))
+        if diff.get("removed_count"):
+            bits.append(f'−{int(diff["removed_count"])} retirée' + ("s" if int(diff["removed_count"]) > 1 else ""))
+        if bits:
+            removed_note = (
+                ' <span class="fine">« Retirée » signifie absente de cette collecte, '
+                "pas nécessairement terminée.</span>" if diff.get("removed_count") else ""
+            )
+            changes = f'<p class="rw-changes">Depuis la dernière collecte : {" · ".join(bits)}.{removed_note}</p>'
+    stale_html = (
+        '<p class="rw-stale warning">Collecte à actualiser : ces données ont plus de six '
+        "heures. Vérifiez la carte officielle avant de partir.</p>" if stale else ""
+    )
+    institution = esc(str(rw.get("institution_name") or "Ville de Québec").strip())
+    dataset = safe_url(rw.get("dataset_url"))
+    dataset_link = (
+        f'<a href="{esc(dataset)}" rel="noopener noreferrer">{institution} — Entraves à la circulation en temps réel</a>'
+        if dataset else f"{institution} — Entraves à la circulation en temps réel"
+    )
+    return (
+        '<section class="roadworks" id="travaux" aria-labelledby="roadworks-title">'
+        '<div class="section-top"><div><p class="eyebrow">DONNÉES OFFICIELLES</p>'
+        '<h2 id="roadworks-title">Travaux et entraves.</h2></div>'
+        f'<p class="section-note">{count_note}</p></div>'
+        '<p class="dossiers-intro">Les entraves déclarées par la Ville dans son flux '
+        "officiel en temps réel, relayées telles quelles. Vigie ne recalcule aucun "
+        "effet sur votre trajet et ne classe pas ces données avec les articles.</p>"
+        f"{changes}{listing}{more}{stale_html}"
+        f'<p class="rw-map"><a href="{RW_MAP_URL}" rel="noopener noreferrer">Ouvrir la carte officielle des travaux <span aria-hidden="true">↗</span></a></p>'
+        f'<p class="rw-attr fine">Données : {dataset_link} (CC-BY 4.0, via Données Québec). '
+        f"Collecte du {date_html(fetched.isoformat())}. Les dates marquées « estimées » "
+        "le sont par la Ville, pas par Vigie.</p></section>"
+    )
+
+
 def article_html(item: dict, index: int, related: list[dict]) -> str:
     title = esc(item["title"])
     geo = {"quebec-city": "Québec et environs", "quebec": "Au Québec", "linked": "Ailleurs"}.get(item["geo"], "Ailleurs")
@@ -389,7 +543,7 @@ def article_html(item: dict, index: int, related: list[dict]) -> str:
       </div></article>'''
 
 
-def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None) -> str:
+def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None, roadworks: dict | None = None) -> str:
     now = parse_date(generated_at) or datetime.now(timezone.utc)
     rows, excluded = prepare_items(ranked, now)
     run = latest_run() if run is None else run
@@ -422,6 +576,7 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 <div class="results-bar"><p id="result-count" role="status">{len(rows)} articles récents dans les flux collectés</p><button class="text-button js-only" type="button" id="reset-filters">Réinitialiser les filtres</button></div><div id="stories">{stories}{empty}</div>
 <div id="no-results" class="no-data" hidden><h3>Aucun article dans cette vue.</h3><p>Essayez un autre lieu ou élargissez le territoire. Une absence dans nos flux ne signifie pas qu’il ne se passe rien.</p><button type="button" id="empty-reset">Voir le point local</button></div>
 <div class="brief-end"><p id="end-note">Vous avez fait le tour de cette sélection.</p><button class="js-only" id="show-more" type="button">Voir les autres articles</button><span class="fine">Pas de défilement infini. Revenez quand vous en avez besoin.</span></div></section>
+{roadworks_section(roadworks, now)}
 {change_section(ledger)}
 {dossiers_section(issues, eligible)}
 <section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>

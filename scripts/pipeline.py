@@ -1,7 +1,8 @@
 """Vigie v0 - one-command Critical Path.
 
-Runs: ingest -> normalize -> enrich -> cluster -> rank/display.
-Stdlib only. Does not start the server (open a second terminal for that).
+Runs: ingest (RSS + official WZDX roadworks) -> normalize -> enrich -> cluster
+-> rank/display. Stdlib only. Does not start the server (open a second terminal
+for that). Offline mode reuses raw snapshots and makes no network requests.
 
 Usage (from repo root):
   python scripts/pipeline.py
@@ -20,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = [
     "ingest_rss.py",
+    "ingest_wzdx.py",
     "normalize.py",
     "enrich.py",
     "cluster_issues.py",
@@ -27,11 +29,11 @@ SCRIPTS = [
 ]
 
 
-def run(script: str) -> None:
+def run(script: str, *extra: str) -> None:
     path = ROOT / "scripts" / script
-    print(f"\n=== {script} ===", flush=True)
+    print(f"\n=== {' '.join((script, *extra))} ===", flush=True)
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-    proc = subprocess.run([sys.executable, str(path)], cwd=str(ROOT), env=env)
+    proc = subprocess.run([sys.executable, str(path), *extra], cwd=str(ROOT), env=env)
     if proc.returncode != 0:
         raise SystemExit(f"{script} failed with code {proc.returncode}")
 
@@ -46,7 +48,10 @@ def main() -> int:
     selected = SCRIPTS[-1:] if args.render_only else SCRIPTS[1:] if args.offline else SCRIPTS
     print("Vigie pipeline" + (" (offline snapshots)" if args.offline else " (render existing store)" if args.render_only else " (refresh sources)"))
     for name in selected:
-        run(name)
+        if args.offline and name == "ingest_wzdx.py":
+            run(name, "--offline")
+        else:
+            run(name)
     if args.stage:
         run("stage_public.py")
     print("\nDone. Serve with: python scripts/serve.py")
