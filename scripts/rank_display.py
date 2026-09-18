@@ -41,29 +41,16 @@ GEO_SCORE = {
 def fmt_stamp(iso: str | None) -> str:
     if not iso:
         return "unknown"
-    # Keep timezone; trim microseconds for the eye
+    # Normalize any parseable aware clock to "YYYY-MM-DD HH:MM ZONE";
+    # unparseable or zoneless strings pass through untouched (never claim UTC).
     s = str(iso).strip()
-    if "." in s:
-        head, rest = s.split(".", 1)
-        # keep +00:00 / Z
-        tz = ""
-        for sep in ("+", "-", "Z"):
-            if sep in rest:
-                i = rest.find(sep)
-                if sep == "-" and i == 0:
-                    continue
-                tz = rest[i:] if sep != "Z" else "Z"
-                if sep == "-" and "+" not in rest[1:] and rest.endswith("Z"):
-                    pass
-                break
-        # simpler: fromisoformat then replace
-        try:
-            from datetime import datetime as _dt
-            dt = _dt.fromisoformat(s.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d %H:%M UTC").replace(" UTC", " " + (dt.tzname() or "UTC"))
-        except Exception:
-            return s[:19] + "Z" if s.endswith("Z") or "+" in s else s[:19]
-    return s
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return s
+    if dt.tzinfo is None:
+        return s
+    return f"{dt:%Y-%m-%d %H:%M} {dt.tzname() or 'UTC'}"
 
 
 def load_clock(ranked_at: str) -> dict:

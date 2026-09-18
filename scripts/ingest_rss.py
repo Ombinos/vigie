@@ -218,7 +218,13 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
                 with opener.open(req, timeout=TIMEOUT) as resp:
                     content_type = resp.headers.get("Content-Type")
                     content_length = resp.headers.get("Content-Length")
-                    if content_length and int(content_length) > MAX_FEED_BYTES:
+                    # Header hint only — a malformed or absent value must not
+                    # fail the fetch; the bounded read below is the real cap.
+                    try:
+                        declared = int(content_length) if content_length else None
+                    except ValueError:
+                        declared = None
+                    if declared is not None and declared > MAX_FEED_BYTES:
                         raise ValueError("Feed exceeds size limit")
                     body = resp.read(MAX_FEED_BYTES + 1)
                     if len(body) > MAX_FEED_BYTES:

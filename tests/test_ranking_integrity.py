@@ -40,3 +40,19 @@ class RankingIntegrity(unittest.TestCase):
         issue["clustered_at"] = "today"
         b = rank.build_approaches([issue], {})
         self.assertEqual(rank.approach_fingerprint(a[0]), rank.approach_fingerprint(b[0]))
+
+
+class StampDisplay(unittest.TestCase):
+    def test_all_aware_iso_shapes_render_one_clock_format(self):
+        self.assertEqual(rank.fmt_stamp("2026-09-18T16:17:52.252133+00:00"), "2026-09-18 16:17 UTC")
+        self.assertEqual(rank.fmt_stamp("2026-09-18T16:17:52Z"), "2026-09-18 16:17 UTC")
+        self.assertEqual(rank.fmt_stamp("2026-09-18T16:17:52+00:00"), "2026-09-18 16:17 UTC")
+
+    def test_non_utc_offset_keeps_its_zone(self):
+        self.assertEqual(rank.fmt_stamp("2026-09-18T12:17:52-04:00"), "2026-09-18 12:17 UTC-04:00")
+
+    def test_zoneless_and_unparseable_strings_pass_through(self):
+        self.assertEqual(rank.fmt_stamp("2026-09-18 16:17:52"), "2026-09-18 16:17:52")
+        self.assertEqual(rank.fmt_stamp("garbage"), "garbage")
+        self.assertEqual(rank.fmt_stamp(None), "unknown")
+        self.assertEqual(rank.fmt_stamp(""), "unknown")

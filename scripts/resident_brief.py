@@ -372,7 +372,10 @@ def dossiers_section(issues: list[dict], eligible: dict) -> str:
     if dossiers:
         cards = "".join(dossier_html(iss, eligible) for iss in dossiers[:6])
         label = "dossier proposé" if count == 1 else "dossiers proposés"
-        note = f"{count} {label}<br>cette édition."
+        if count > 6:
+            note = f"{count} {label} cette édition — les 6 premiers affichés ici."
+        else:
+            note = f"{count} {label}<br>cette édition."
         listing = f'<div class="dossier-list">{cards}</div>'
     else:
         note = "Aucun dossier<br>cette édition."
@@ -432,6 +435,14 @@ def change_section(ledger: dict | None) -> str:
         )
     else:
         blocks: list[str] = []
+
+        def truncated(total: int, shown: int = 6) -> str:
+            return (
+                f'<p class="fine">+ {total - shown} autres dans les données'
+                " de cette édition.</p>"
+                if total > shown else ""
+            )
+
         if new:
             items = "".join(
                 '<li><span class="chg-tag chg-new">Nouveau</span>'
@@ -440,7 +451,7 @@ def change_section(ledger: dict | None) -> str:
             )
             blocks.append(
                 f'<div class="chg-group"><h3>Nouveaux dossiers <span class="chg-n">{len(new)}</span></h3>'
-                f'<ul class="chg-list">{items}</ul></div>'
+                f'<ul class="chg-list">{items}</ul>{truncated(len(new))}</div>'
             )
         if developed:
             items = "".join(
@@ -451,7 +462,7 @@ def change_section(ledger: dict | None) -> str:
             )
             blocks.append(
                 f'<div class="chg-group"><h3>Dossiers développés <span class="chg-n">{len(developed)}</span></h3>'
-                f'<ul class="chg-list">{items}</ul></div>'
+                f'<ul class="chg-list">{items}</ul>{truncated(len(developed))}</div>'
             )
         if quiet:
             items = "".join(
@@ -461,7 +472,7 @@ def change_section(ledger: dict | None) -> str:
             )
             blocks.append(
                 f'<div class="chg-group"><h3>Disparus de cette collecte <span class="chg-n">{len(quiet)}</span></h3>'
-                f'<ul class="chg-list">{items}</ul>'
+                f'<ul class="chg-list">{items}</ul>{truncated(len(quiet))}'
                 '<p class="fine">« Retiré » signifie absent de cette collecte, pas réglé. '
                 "Une absence n’est pas un silence éditorial prouvé.</p></div>"
             )

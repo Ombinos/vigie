@@ -129,6 +129,19 @@ class FeedNetworkBoundary(unittest.TestCase):
                 ingest_rss.fetch_bytes("https://news.example/feed")
         response.read.assert_called_once_with(33)
 
+    def test_malformed_content_length_does_not_fail_the_fetch(self):
+        response = mock.MagicMock()
+        response.headers = {"Content-Type": "application/rss+xml", "Content-Length": "garbage"}
+        response.read.return_value = b"<rss/>"
+        response.__enter__.return_value = response
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(ingest_rss, "public_http_url"), \
+                mock.patch.object(ingest_rss.urllib.request, "build_opener", return_value=opener):
+            body, content_type = ingest_rss.fetch_bytes("https://news.example/feed")
+        self.assertEqual(body, b"<rss/>")
+        self.assertEqual(content_type, "application/rss+xml")
+
 
 class CandidateIntegrity(unittest.TestCase):
     def test_tracking_parameters_dedupe_but_functional_query_is_preserved(self):
@@ -218,6 +231,28 @@ class OfflineRebuildEditionIdentity(unittest.TestCase):
                 json.dumps({"fetched_at": "2026-09-18T09:00:00+00:00"}), encoding="utf-8")
             stamp = self._normalized_at(raw, out, sources, datetime(2026, 9, 18, 13, tzinfo=timezone.utc))
             self.assertEqual(stamp, "2026-09-18T09:00:00+00:00")
+
+
+class NewestOutcomeSelection(unittest.TestCase):
+    """The selected snapshot is the newest collection outcome, never the error stub."""
+
+    def test_same_stamp_outcome_wins_over_error_document(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "a"
+            dest.mkdir()
+            stamp = "20260918T060000Z"
+            (dest / f"{stamp}_error.json").write_text(
+                json.dumps({"ok": False, "error": "Timeout", "fetched_at": "2026-09-18T06:00:00+00:00"}),
+                encoding="utf-8")
+            (dest / f"{stamp}_0123456789ab.json").write_text(json.dumps({
+                "ok": True, "source_id": "a", "fetched_at": "2026-09-18T06:00:00+00:00", "items": [],
+            }), encoding="utf-8")
+            (dest / "20260918T030000Z_ffeeddccbbaa.json").write_text(json.dumps({
+                "ok": True, "source_id": "a", "fetched_at": "2026-09-18T03:00:00+00:00", "items": [],
+            }), encoding="utf-8")
+            with mock.patch.object(normalize, "RAW_DIR", Path(tmp)):
+                picked = normalize.latest_meta_files([{"id": "a", "type": "rss", "enabled": True, "url": "https://news.example/a"}])
+            self.assertEqual(picked[0].name, f"{stamp}_0123456789ab.json")
 
 
 class NormalizationFreshness(unittest.TestCase):

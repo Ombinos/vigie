@@ -101,7 +101,10 @@ def latest_meta_files(sources: list[dict] | None = None) -> list[Path]:
         ]
         if not metas:
             continue
-        metas.sort(key=lambda p: p.name, reverse=True)
+        # Newest collection stamp first; when one stamp carries both an outcome
+        # and an error document, the outcome wins (the error is the same attempt
+        # retried, not a later failure).
+        metas.sort(key=lambda p: (p.name[:16], not p.name.endswith("_error.json")), reverse=True)
         files.append(metas[0])
     return files
 
