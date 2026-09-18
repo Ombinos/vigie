@@ -58,6 +58,33 @@ def stable_id(url: str | None, source_id: str, title: str | None, guid: str | No
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
 
 
+def collection_timestamp(metas: list[Path], fallback: datetime) -> datetime:
+    """The collection clock this snapshot represents, never the rebuild clock.
+
+    One edition is one collection snapshot (see dossier_history): an offline
+    rebuild of the same raw snapshots must keep the same ``normalized_at`` or
+    it would inflate every dossier's ``editions_seen``. The newest ingest run
+    document is authoritative; then the newest selected source snapshot; the
+    caller's build clock is a last resort only.
+    """
+    for path in sorted(RAW_DIR.glob("_run_*.json"), reverse=True):
+        try:
+            stamp = parse_timestamp(json.loads(path.read_text(encoding="utf-8")).get("fetched_at"))
+        except (OSError, ValueError):
+            continue
+        if stamp:
+            return stamp
+    stamps: list[datetime] = []
+    for path in metas:
+        try:
+            stamp = parse_timestamp(json.loads(path.read_text(encoding="utf-8")).get("fetched_at"))
+        except (OSError, ValueError):
+            continue
+        if stamp:
+            stamps.append(stamp)
+    return max(stamps) if stamps else fallback
+
+
 def latest_meta_files(sources: list[dict] | None = None) -> list[Path]:
     files: list[Path] = []
     if not RAW_DIR.exists():
@@ -187,6 +214,9 @@ def main() -> int:
         return 1
     fetched_at = utc_now()
     stamp = fetched_at.strftime("%Y%m%dT%H%M%SZ")
+    # Edition identity comes from the collection, not this rebuild: an offline
+    # rerun over the same raw snapshots is the same edition.
+    normalized_at = collection_timestamp(metas, fetched_at)
     candidates: list[dict] = []
     seen_ids: set[str] = set()
     per_source: dict[str, int] = {}
@@ -231,7 +261,7 @@ def main() -> int:
         print(f"  {source_id}: {n} candidates from {meta_path.name}")
 
     out = {
-        "normalized_at": fetched_at.isoformat(),
+        "normalized_at": normalized_at.isoformat(),
         "source_meta_files": [str(p.relative_to(ROOT) if p.is_relative_to(ROOT) else p).replace("\\", "/") for p in metas],
         "max_fetch_age_hours": MAX_FETCH_AGE_HOURS,
         "source_status": source_status,

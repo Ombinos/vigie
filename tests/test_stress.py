@@ -15,9 +15,11 @@ from pathlib import Path
 
 import harness  # noqa: F401 - puts scripts/ on sys.path
 
+import ambient_pulse
 import cluster_issues
 import dossier_history
 import ingest_wzdx
+import rank_display
 import refresh
 import resident_brief as brief
 import stage_public
@@ -302,6 +304,64 @@ class RenderStress(unittest.TestCase):
         self.assertIn("<html", page)
         self.assertNotIn("rw-changes", page)
         self.assertNotIn("Dans nos collectes depuis", page)
+
+    def test_malformed_story_facets_never_crash_a_render(self) -> None:
+        evil = story()
+        evil["enrich"] = {
+            "geo": {"geo": 42}, "topics": [{"topic": {"nested": 1}}, {"topic": [1]}],
+            "impacts": [None, {"units": [None, {}]}],
+        }
+        page = brief.render_brief([evil], NOW.isoformat(), [], collection())
+        self.assertIn("<html", page)
+        # The workbench ranks render raw store rows without prepare_items.
+        hostile = story(url=7, rank_score="x", source_name=42)
+        page2 = rank_display.render_html([hostile, None, 42], NOW.isoformat(), [], {})
+        self.assertIn("<!DOCTYPE html", page2)
+
+    def _nested_evil_issue(self, **overrides) -> dict:
+        issue = {
+            "issue_id": "x", "scar": "s", "question": "Sujet suivi",
+            "geo_focus": ["quebec-city"], "source_count": 2,
+            "topic": {"topic": "other"},
+        }
+        issue.update(overrides)
+        return issue
+
+    def test_malformed_nested_issue_fields_never_crash_the_brief(self) -> None:
+        for overrides in (
+            {"tensions": [None, "junk", 42]},
+            {"tensions": [{"items": [None, 3, "x"]}]},
+            {"tensions": [{"items": [], "institution_name": None}]},
+            {"silence": {"silent": [None, "junk"]}},
+            {"silence": "garbage"},
+            {"geo_focus": 42, "topic": None},
+        ):
+            with self.subTest(overrides=overrides):
+                page = brief.render_brief(
+                    [story()], NOW.isoformat(), [self._nested_evil_issue(**overrides)], collection()
+                )
+                self.assertIn("<html", page)
+
+    def test_malformed_nested_issue_fields_never_crash_the_workbench(self) -> None:
+        for overrides in (
+            {"tensions": [None, "junk", 42]},
+            {"tensions": [{"items": [None, 3]}]},
+            {"silence": {"silent": [None, "junk"], "silent_count": "abc"}},
+        ):
+            with self.subTest(overrides=overrides):
+                page = rank_display.render_html(
+                    [story(), None, 42], NOW.isoformat(), [self._nested_evil_issue(**overrides)], {}
+                )
+                self.assertIn("<!DOCTYPE html", page)
+
+    def test_malformed_pulse_never_crashes_the_morning_twin(self) -> None:
+        digest = {"approaches": [None, {"question": "q", "units": [None, {"raw": "1 450 $"}],
+                                        "quiet_names": [None, "Ville"]}], "pulse": {}}
+        self.assertIn("<html", ambient_pulse.render_morning_html(digest))
+        txt = ambient_pulse.render_morning_txt(digest)
+        self.assertIn("morning pulse", txt)
+        widget = ambient_pulse.render_morning_widget(digest)
+        self.assertIn("Vigie morning", widget)
 
 
 class WzdxHostileGeometry(unittest.TestCase):

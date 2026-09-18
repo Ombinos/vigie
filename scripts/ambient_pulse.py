@@ -40,7 +40,7 @@ TRUST_NOTE = (
 
 def clustered_at_from_issues(issues: list[dict], fallback: str) -> str:
     for iss in issues or []:
-        if iss.get("clustered_at"):
+        if isinstance(iss, dict) and iss.get("clustered_at"):
             return str(iss["clustered_at"])
     return fallback
 
@@ -77,6 +77,7 @@ def build_digest(
                 "evidence": iss.get("evidence") or {},
             }
             for i, iss in enumerate((issues or [])[:rank_display.APPROACH_MAX])
+            if isinstance(iss, dict)
         },
         "identity": {
             "issue_ids": [str(a.get("issue_id") or "") for a in approaches],
@@ -119,6 +120,8 @@ def stage_fight_issue_ids(issues: list[dict]) -> list[str]:
     """Stage panels = same store fights Arrival/Ambient present (cap APPROACH_MAX)."""
     out: list[str] = []
     for iss in (issues or [])[: rank_display.APPROACH_MAX]:
+        if not isinstance(iss, dict):
+            continue
         out.append(str(iss.get("issue_id") or iss.get("scar") or ""))
     return out
 
@@ -131,11 +134,12 @@ def digest_matches_stage_fights(digest: dict, issues: list[dict]) -> bool:
 
 def digest_approach_link_html(ap: dict, details: dict | None = None) -> str:
     """Glance row as link into Arrival deep-link — same Approach object as Arrival."""
+    ap = ap if isinstance(ap, dict) else {}
     q = rank_display.esc((ap.get("question") or "Issue")[:110])
     nest_key = ap.get("nest") or "linked"
     issue_id = rank_display.esc(str(ap.get("issue_id") or ""))
     fp = rank_display.esc(rank_display.approach_fingerprint(ap))
-    idx = int(ap.get("index") or 0)
+    idx = rank_display.safe_int(ap.get("index"))
     remix_cls = " approach-remix" if ap.get("remix") else ""
     meta = rank_display.approach_meta_chips_html(ap) + rank_display.approach_silence_preview_html(
         ap
@@ -150,9 +154,9 @@ def digest_approach_link_html(ap: dict, details: dict | None = None) -> str:
         f"<a class='approach{remix_cls}' href=\"{href}\" "
         f"data-i='{idx}' data-issue-id='{issue_id}' data-fp='{fp}' "
         f"data-nest='{rank_display.esc(str(nest_key))}' "
-        f"data-voices='{int(ap.get('voices') or 0)}' "
-        f"data-silent='{int(ap.get('silent') or 0)}' "
-        f"data-units='{len(ap.get('units') or [])}'>"
+        f"data-voices='{rank_display.safe_int(ap.get('voices'))}' "
+        f"data-silent='{rank_display.safe_int(ap.get('silent'))}' "
+        f"data-units='{len([u for u in (ap.get('units') or []) if isinstance(u, dict)])}'>"
         f"<span class='approach-top'>"
         f"<span class='approach-q'>{q}</span>"
         f"</span>"
@@ -173,18 +177,20 @@ def render_morning_txt(digest: dict) -> str:
         "",
     ]
     for i, ap in enumerate(digest.get("approaches") or [], start=1):
+        if not isinstance(ap, dict):
+            continue
         nest = rank_display.NEST_LABEL.get(str(ap.get("nest") or ""), ap.get("nest"))
         silent = ap.get("silent")
-        silent_n = 0 if silent is None else int(silent)
+        silent_n = 0 if silent is None else rank_display.safe_int(silent)
         lines.append(
             f"{i}. [{nest}] {ap.get('question') or 'Issue'} "
-            f"({int(ap.get('voices') or 0)} voices · {silent_n} silent)"
+            f"({rank_display.safe_int(ap.get('voices'))} voices · {silent_n} silent)"
         )
         details = (digest.get("source_details") or {}).get(str(ap.get("issue_id") or "")) or {}
         if details.get("label_kind") == "attributed_headline":
             source = details.get("label_source") or {}
             lines.append(f"   Titre de {source.get('source_name') or source.get('source_id') or 'la source'} · rapprochement proposé")
-        units = ap.get("units") or []
+        units = [u for u in (ap.get("units") or []) if isinstance(u, dict)]
         unit_raw = [str(u.get("raw") or "").strip() for u in units if str(u.get("raw") or "").strip()]
         if unit_raw:
             for raw in unit_raw:
@@ -215,20 +221,22 @@ def render_morning_widget(digest: dict) -> str:
     if not approaches:
         lines.append("(no Approaches — scars need ≥2 institutions)")
     for i, ap in enumerate(approaches, start=1):
+        if not isinstance(ap, dict):
+            continue
         nest = rank_display.NEST_LABEL.get(str(ap.get("nest") or ""), ap.get("nest") or "?")
         silent = ap.get("silent")
-        silent_n = 0 if silent is None else int(silent)
+        silent_n = 0 if silent is None else rank_display.safe_int(silent)
         q = str(ap.get("question") or "Issue").strip()
         if len(q) > 72:
             q = q[:69] + "…"
         unit_bits = [
             str(u.get("raw") or "").strip()
             for u in (ap.get("units") or [])
-            if str(u.get("raw") or "").strip()
+            if isinstance(u, dict) and str(u.get("raw") or "").strip()
         ]
         unit = unit_bits[0] if unit_bits else "no units yet"
         lines.append(
-            f"{i}. {nest} · {q} · {int(ap.get('voices') or 0)}v/{silent_n}s · {unit}"
+            f"{i}. {nest} · {q} · {rank_display.safe_int(ap.get('voices'))}v/{silent_n}s · {unit}"
         )
     lines.append("")
     lines.append("/morning.html · /index.html")
@@ -237,7 +245,7 @@ def render_morning_widget(digest: dict) -> str:
 
 def render_morning_html(digest: dict) -> str:
     """Thin ambient surface — one composition, same Approaches, deep-link to Arrival."""
-    approaches = digest.get("approaches") or []
+    approaches = [a for a in (digest.get("approaches") or []) if isinstance(a, dict)]
     source_details = digest.get("source_details") or {}
     rows = "".join(digest_approach_link_html(a, source_details.get(str(a.get("issue_id") or ""))) for a in approaches)
     if not rows:

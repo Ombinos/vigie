@@ -283,8 +283,8 @@ def _claim(
 
 def propose_claims(c: dict) -> list[dict]:
     """Rules-only speech objects. Proposed never truth. No title-colon priest."""
-    title = c.get("title") or ""
-    summary = c.get("summary") or ""
+    title = c.get("title") if isinstance(c.get("title"), str) else ""
+    summary = c.get("summary") if isinstance(c.get("summary"), str) else ""
     out: list[dict] = []
     seen: set[str] = set()
 
@@ -362,7 +362,7 @@ def propose_geo(c: dict, text: str) -> dict:
     city_match = STRICT_CITY.search(text)
     # French distinguishes the city (à Québec) from the province (au Québec).
     # Keep government-as-addressee phrasing provincial: Ottawa demande à Québec.
-    title = c.get("title") or ""
+    title = c.get("title") if isinstance(c.get("title"), str) else ""
     location = CITY_LOCATION.search(title)
     if not city_match and location and not GOVERNMENT_ADDRESSEE.search(title[:location.start()]):
         city_match = location

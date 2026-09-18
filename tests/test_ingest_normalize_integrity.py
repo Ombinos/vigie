@@ -170,6 +170,56 @@ class CandidateIntegrity(unittest.TestCase):
         self.assertEqual(item["institution"], "publisher")
 
 
+class OfflineRebuildEditionIdentity(unittest.TestCase):
+    """An offline rebuild of the same raw snapshots is the same edition.
+
+    dossier_history keys an edition on normalized_at; if normalize stamped the
+    rebuild clock instead of the collection clock, every --offline run would
+    inflate every dossier's editions_seen (contradicting the house law).
+    """
+
+    def _fixture(self, root: Path) -> tuple[Path, Path, Path]:
+        raw, out = root / "raw", root / "normalized"
+        sources = root / "sources.yaml"
+        raw.mkdir()
+        sources.write_text(
+            "sources:\n  - id: a\n    type: rss\n    name: a\n"
+            "    url: https://news.example/a\n    enabled: true\n",
+            encoding="utf-8",
+        )
+        dest = raw / "a"
+        dest.mkdir()
+        (dest / "20260918T060000Z_ok.json").write_text(json.dumps({
+            "ok": True, "source_id": "a", "fetched_at": "2026-09-18T06:00:00+00:00",
+            "items": [{"title": "Avis", "url": "https://news.example/1"}],
+        }), encoding="utf-8")
+        return raw, out, sources
+
+    def _normalized_at(self, raw: Path, out: Path, sources: Path, build: datetime) -> str:
+        with mock.patch.multiple(normalize, RAW_DIR=raw, OUT_DIR=out, SOURCES_PATH=sources), \
+                mock.patch.object(normalize, "utc_now", return_value=build):
+            self.assertEqual(normalize.main(), 0)
+        return json.loads((out / "latest_candidates.json").read_text(encoding="utf-8"))["normalized_at"]
+
+    def test_rebuild_clock_is_not_the_edition_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, out, sources = self._fixture(Path(tmp))
+            first = self._normalized_at(raw, out, sources, datetime(2026, 9, 18, 7, tzinfo=timezone.utc))
+            second = self._normalized_at(raw, out, sources, datetime(2026, 9, 18, 13, tzinfo=timezone.utc))
+            self.assertEqual(first, second)
+            self.assertEqual(first, "2026-09-18T06:00:00+00:00")
+
+    def test_newest_ingest_run_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            raw, out, sources = self._fixture(Path(tmp))
+            (raw / "_run_20260918T060000Z.json").write_text(
+                json.dumps({"fetched_at": "2026-09-18T06:00:00+00:00"}), encoding="utf-8")
+            (raw / "_run_20260918T090000Z.json").write_text(
+                json.dumps({"fetched_at": "2026-09-18T09:00:00+00:00"}), encoding="utf-8")
+            stamp = self._normalized_at(raw, out, sources, datetime(2026, 9, 18, 13, tzinfo=timezone.utc))
+            self.assertEqual(stamp, "2026-09-18T09:00:00+00:00")
+
+
 class NormalizationFreshness(unittest.TestCase):
     def test_disabled_failed_stale_and_corrupt_feeds_do_not_resurface(self):
         now = datetime(2026, 9, 16, 18, tzinfo=timezone.utc)

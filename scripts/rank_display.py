@@ -111,7 +111,10 @@ IMPACT_TOPICS = frozenset({
 
 
 def primary_topic(c: dict) -> str:
-    en = c.get("enrich") or {}
+    if not isinstance(c, dict):
+        return "other"
+    en = c.get("enrich")
+    en = en if isinstance(en, dict) else {}
     topics = en.get("topics") or []
     if topics and isinstance(topics[0], dict):
         return str(topics[0].get("topic") or "other").lower()
@@ -119,6 +122,8 @@ def primary_topic(c: dict) -> str:
 
 
 def is_impact(c: dict) -> bool:
+    if not isinstance(c, dict):
+        return False
     t = primary_topic(c)
     if t in IMPACT_TOPICS:
         return True
@@ -126,17 +131,27 @@ def is_impact(c: dict) -> bool:
     if "/" in t and any(part in IMPACT_TOPICS for part in t.split("/")):
         return True
     # Falsifiable units also count as life-hit for display preference only
-    for imp in ((c.get("enrich") or {}).get("impacts") or []):
-        if imp.get("units"):
+    for imp in (impact_block(c).get("impacts") or []):
+        if isinstance(imp, dict) and imp.get("units"):
             return True
     return False
 
 
+def impact_block(c: dict) -> dict:
+    """The proposed enrich object, only when it really is an object."""
+    en = c.get("enrich") if isinstance(c, dict) else None
+    return en if isinstance(en, dict) else {}
+
+
 def impact_units(c: dict) -> list[dict]:
     out: list[dict] = []
-    for imp in ((c.get("enrich") or {}).get("impacts") or []):
+    if not isinstance(c, dict):
+        return out
+    for imp in (impact_block(c).get("impacts") or []):
+        if not isinstance(imp, dict):
+            continue
         for u in imp.get("units") or []:
-            if u.get("raw") or u.get("value") is not None:
+            if isinstance(u, dict) and (u.get("raw") or u.get("value") is not None):
                 out.append(u)
     return out[:3]
 
@@ -150,6 +165,8 @@ def impact_first(items: list[dict]) -> list[dict]:
 
 def parse_when(c: dict) -> datetime | None:
     # Download time is not publication time. Undated stories stay undated.
+    if not isinstance(c, dict):
+        return None
     raw = c.get("published_at")
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -164,8 +181,9 @@ def parse_when(c: dict) -> datetime | None:
 
 
 def display_geo(c: dict) -> str:
-    en = c.get("enrich") or {}
-    g = en.get("geo") or {}
+    if not isinstance(c, dict):
+        return "linked"
+    g = impact_block(c).get("geo") or {}
     if isinstance(g, dict) and g.get("geo"):
         return str(g["geo"]).lower()
     nest = (c.get("nest_role") or "").lower()
@@ -206,14 +224,22 @@ def score_item(c: dict, now: datetime) -> float:
 
 
 def esc(s: str) -> str:
+    text = "" if s is None else str(s)
     return (
-        (s or "")
+        text
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
         .replace("'", "&#x27;")
     )
+
+
+def safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 def link_url(value: object) -> str:
@@ -233,7 +259,9 @@ def section_for(c: dict) -> str:
 
 def is_booth_or_brief(c: dict) -> bool:
     """Ohdio rattrapage / en-bref — booth or brief, not a news scar. Display demote only."""
-    url = (c.get("url") or "").lower()
+    if not isinstance(c, dict):
+        return False
+    url = str(c.get("url") or "").lower()
     return "/ohdio/" in url or "/en-bref/" in url
 
 
@@ -243,9 +271,10 @@ def is_ohdio(c: dict) -> bool:
 
 
 def topic_line(c: dict) -> str:
-    en = c.get("enrich") or {}
-    topics = en.get("topics") or []
-    labels = [t.get("topic") for t in topics if t.get("topic")]
+    if not isinstance(c, dict):
+        return ""
+    topics = impact_block(c).get("topics") or []
+    labels = [t.get("topic") for t in topics if isinstance(t, dict) and t.get("topic")]
     st = c.get("enrich_status") or "pending"
     geo = display_geo(c)
     if labels:
@@ -254,15 +283,18 @@ def topic_line(c: dict) -> str:
 
 
 def item_topics(c: dict) -> list[str]:
-    en = c.get("enrich") or {}
-    topics = en.get("topics") or []
-    return [str(t.get("topic")) for t in topics if t.get("topic")]
+    topics = impact_block(c).get("topics") or []
+    return [str(t.get("topic")) for t in topics if isinstance(t, dict) and t.get("topic")]
 
 
 def issue_candidate_ids(iss: dict) -> set[str]:
     ids: set[str] = set()
     for t in iss.get("tensions") or []:
+        if not isinstance(t, dict):
+            continue
         for it in t.get("items") or []:
+            if not isinstance(it, dict):
+                continue
             cid = it.get("candidate_id")
             if cid:
                 ids.add(str(cid))
@@ -271,13 +303,17 @@ def issue_candidate_ids(iss: dict) -> set[str]:
 
 def build_continuity(issues: list[dict], ranked: list[dict]) -> dict:
     """Same fight maps from scars already on disk — never a painted for-you feed."""
-    by_id = {str(c.get("id")): c for c in ranked if c.get("id")}
+    by_id = {str(c.get("id")): c for c in ranked if isinstance(c, dict) and c.get("id")}
     id_to_issues: dict[str, list[dict]] = {}
     for iss in issues:
+        if not isinstance(iss, dict):
+            continue
         for cid in issue_candidate_ids(iss):
             id_to_issues.setdefault(cid, []).append(iss)
     topic_to_ids: dict[str, list[str]] = {}
     for c in ranked:
+        if not isinstance(c, dict):
+            continue
         cid = str(c.get("id") or "")
         if not cid:
             continue
@@ -289,6 +325,8 @@ def build_continuity(issues: list[dict], ranked: list[dict]) -> dict:
 
 def same_fight_links(c: dict, continuity: dict, *, limit: int = 3) -> list[tuple[str, str]]:
     """Scar brothers only — share an issue_id / named scar on disk. Never bare topic."""
+    if not isinstance(c, dict):
+        return []
     cid = str(c.get("id") or "")
     by_id = continuity["by_id"]
     seen = {cid}
@@ -342,6 +380,8 @@ def approach_nest(iss: dict) -> str:
 def approach_units_for_issue(iss: dict, by_id: dict) -> list[dict]:
     """Units from scar items already on disk — no new ranking."""
     found: list[dict] = []
+    if not isinstance(iss, dict):
+        return found
     seen: set[str] = set()
     for cid in issue_candidate_ids(iss):
         c = by_id.get(str(cid))
@@ -360,9 +400,13 @@ def approach_units_for_issue(iss: dict, by_id: dict) -> list[dict]:
 
 def quiet_institution_names(iss: dict, *, limit: int = 2) -> list[str]:
     """Official institutions silent on this scar — glance names, not a bias meter."""
-    silence = iss.get("silence") or {}
+    silence = iss.get("silence") or {} if isinstance(iss, dict) else {}
+    if not isinstance(silence, dict):
+        silence = {}
     out: list[str] = []
     for s in silence.get("silent") or []:
+        if not isinstance(s, dict):
+            continue
         if (s.get("source_kind") or "").lower() != "official":
             continue
         name = (
@@ -383,15 +427,17 @@ def quiet_institution_names(iss: dict, *, limit: int = 2) -> list[str]:
 
 def approach_fingerprint(ap: dict) -> str:
     """Stable store fingerprint for Since-you-left — not a personalization score."""
+    if not isinstance(ap, dict):
+        return ""
     units = ap.get("units")
     if isinstance(units, list):
         n_units = len(units)
     else:
-        n_units = int(ap.get("unit_count") or 0)
+        n_units = safe_int(ap.get("unit_count"))
     silent = ap.get("silent")
-    silent_n = 0 if silent is None else int(silent)
+    silent_n = 0 if silent is None else safe_int(silent)
     return (
-        f"{int(ap.get('voices') or 0)}|"
+        f"{safe_int(ap.get('voices'))}|"
         f"{silent_n}|"
         f"{1 if ap.get('remix') else 0}|"
         f"{n_units}" + (f"|{ap['content_fp']}" if ap.get("content_fp") else "")
@@ -423,11 +469,16 @@ def format_store_clock(iso: str) -> str:
 
 def since_left_delta(prev: list[dict], curr: list[dict]) -> dict:
     """Compare two pulse approach lists by issue_id. Never reorders."""
-    prev_map = {str(a.get("issue_id") or ""): a for a in (prev or []) if a.get("issue_id")}
+    prev_map = {
+        str(a.get("issue_id") or ""): a
+        for a in (prev or []) if isinstance(a, dict) and a.get("issue_id")
+    }
     new_ids: list[str] = []
     changed_ids: list[str] = []
     cur_ids: set[str] = set()
     for a in curr or []:
+        if not isinstance(a, dict):
+            continue
         iid = str(a.get("issue_id") or "")
         if not iid:
             continue
@@ -510,12 +561,15 @@ def build_approaches(issues: list[dict], continuity: dict) -> list[dict]:
     """Approaches = fights in store order. Presentation only. Max APPROACH_MAX.
 
     Phase 2 object: geo nest + voice count + silence + units — glanceable without Stage.
+    A malformed store entry is skipped, never rendered and never fatal.
     """
     by_id = (continuity or {}).get("by_id") or {}
     out: list[dict] = []
-    for i, iss in enumerate((issues or [])[:APPROACH_MAX]):
+    for i, iss in enumerate([x for x in (issues or []) if isinstance(x, dict)][:APPROACH_MAX]):
         silence = iss.get("silence") or {}
-        silent_rows = silence.get("silent") or []
+        if not isinstance(silence, dict):
+            silence = {}
+        silent_rows = [s for s in (silence.get("silent") or []) if isinstance(s, dict)]
         official_silent = sum(
             1 for s in silent_rows if (s.get("source_kind") or "").lower() == "official"
         )
@@ -527,6 +581,7 @@ def build_approaches(issues: list[dict], continuity: dict) -> list[dict]:
         silent_count = silence.get("silent_count")
         if silent_count is None:
             silent_count = len(silent_rows)
+        tensions = [t for t in (iss.get("tensions") or []) if isinstance(t, dict)]
         out.append(
             {
                 "index": i,
@@ -535,8 +590,8 @@ def build_approaches(issues: list[dict], continuity: dict) -> list[dict]:
                 "question": iss.get("question") or "Issue",
                 "topic": topic,
                 "nest": approach_nest(iss),
-                "voices": int(iss.get("source_count") or 0),
-                "silent": int(silent_count),
+                "voices": safe_int(iss.get("source_count")),
+                "silent": safe_int(silent_count),
                 "official_silent": official_silent,
                 "quiet_names": quiet_institution_names(iss),
                 "remix": bool(iss.get("media_remix")),
@@ -546,7 +601,7 @@ def build_approaches(issues: list[dict], continuity: dict) -> list[dict]:
                     "evidence": iss.get("evidence"),
                     "items": sorted([
                         {k: it.get(k) for k in ("candidate_id", "title", "url", "published_at", "claims")}
-                        for t in iss.get("tensions", []) for it in t.get("items", [])
+                        for t in tensions for it in (t.get("items") or []) if isinstance(it, dict)
                     ], key=lambda it: str(it.get("candidate_id") or it.get("url") or "")),
                 }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16],
             }
@@ -575,17 +630,18 @@ def pulse_payload(approaches: list[dict], clustered_at: str) -> dict:
 
 def approach_meta_chips_html(ap: dict) -> str:
     """Glance chips for Approach — geo · voices · silence · units. No Stage required."""
+    ap = ap if isinstance(ap, dict) else {}
     nest_key = ap.get("nest") or "linked"
     nest_label = esc(NEST_LABEL.get(str(nest_key), str(nest_key)))
-    voices = int(ap.get("voices") or 0)
-    silent = int(ap.get("silent") or 0)
+    voices = safe_int(ap.get("voices"))
+    silent = safe_int(ap.get("silent"))
     chips = [
         f"<span class='chip geo' title='Nest'>{nest_label}</span>",
         f"<span class='chip voices' title='Institutions that spoke'>{voices} voices</span>",
         f"<span class='chip silence' title='Enabled institutions absent this run'>"
         f"{silent} silent</span>",
     ]
-    off_s = int(ap.get("official_silent") or 0)
+    off_s = safe_int(ap.get("official_silent"))
     if off_s:
         chips.append(
             f"<span class='chip official' title='Official institutions quiet'>"
@@ -593,7 +649,7 @@ def approach_meta_chips_html(ap: dict) -> str:
         )
     if ap.get("remix"):
         chips.append("<span class='chip remix'>media remix</span>")
-    units = ap.get("units") or []
+    units = [u for u in (ap.get("units") or []) if isinstance(u, dict)]
     unit_bits = []
     for u in units:
         raw = str(u.get("raw") or "").strip()
@@ -611,6 +667,8 @@ def approach_meta_chips_html(ap: dict) -> str:
 
 def approach_silence_preview_html(ap: dict) -> str:
     """Official quiet names on Approach — counts alone are not enough to glance silence."""
+    if not isinstance(ap, dict):
+        return ""
     names = [str(n).strip() for n in (ap.get("quiet_names") or []) if str(n).strip()]
     if not names:
         return ""
@@ -624,6 +682,7 @@ def approach_silence_preview_html(ap: dict) -> str:
 
 def approach_button_html(ap: dict) -> str:
     """Interaction container for one Approach — Phase 2 glance object."""
+    ap = ap if isinstance(ap, dict) else {}
     q = esc((ap.get("question") or "Issue")[:110])
     nest_key = ap.get("nest") or "linked"
     issue_id = esc(str(ap.get("issue_id") or ""))
@@ -632,19 +691,19 @@ def approach_button_html(ap: dict) -> str:
     meta = approach_meta_chips_html(ap) + approach_silence_preview_html(ap)
     return (
         f"<button type='button' class='approach{remix_cls}' "
-        f"data-i='{int(ap.get('index') or 0)}' data-mode='fight' "
+        f"data-i='{safe_int(ap.get('index'))}' data-mode='fight' "
         f"data-issue-id='{issue_id}' data-fp='{fp}' "
         f"data-topic='{esc(str(ap.get('topic') or 'other'))}' "
         f"data-nest='{esc(str(nest_key))}' "
-        f"data-voices='{int(ap.get('voices') or 0)}' "
-        f"data-silent='{int(ap.get('silent') or 0)}' "
-        f"data-units='{len(ap.get('units') or [])}' "
+        f"data-voices='{safe_int(ap.get('voices'))}' "
+        f"data-silent='{safe_int(ap.get('silent'))}' "
+        f"data-units='{len([u for u in (ap.get('units') or []) if isinstance(u, dict)])}' "
         f"data-unit-kinds='{esc(','.join(
             str(u.get('kind') or '').strip()
             for u in (ap.get('units') or [])
-            if str(u.get('kind') or '').strip()
+            if isinstance(u, dict) and str(u.get('kind') or '').strip()
         ))}' "
-        f"data-store-index='{int(ap.get('index') or 0)}'>"
+        f"data-store-index='{safe_int(ap.get('index'))}'>"
         f"<span class='approach-top'>"
         f"<span class='approach-q'>{q}</span>"
         f"<span class='approach-badge' hidden></span>"
@@ -681,10 +740,14 @@ def face_img(cid: str | None, faces: dict[str, dict] | None, *, css: str = "face
 
 
 def card_html(c: dict, continuity: dict | None = None) -> str:
+    c = c if isinstance(c, dict) else {}
     title = esc(c.get("title") or "(no title)")
     url = esc(link_url(c.get("url")))
     source = esc(c.get("source_name") or c.get("source_id") or "")
-    score = c.get("rank_score", 0)
+    try:
+        score = float(c.get("rank_score") or 0)
+    except (TypeError, ValueError):
+        score = 0.0
     geo = esc(display_geo(c))
     chips = chip_topics(c) + chip_units(c)
     cont = ""
@@ -717,6 +780,8 @@ def spoke_institutions_for_stage(iss: dict) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
     for t in iss.get("tensions") or []:
+        if not isinstance(t, dict):
+            continue
         iid = str(t.get("institution_id") or "").strip()
         name = str(
             t.get("institution_name")
@@ -740,11 +805,14 @@ def spoke_institutions_for_stage(iss: dict) -> list[dict]:
 
 def fight_theater_arc_html(iss: dict) -> str:
     """Spoke + silence arc — answer who spoke / who didn't without scrolling archaeology."""
+    iss = iss if isinstance(iss, dict) else {}
     silence = iss.get("silence") or {}
-    silent_rows = silence.get("silent") or []
-    silent_n = int(silence.get("silent_count") or len(silent_rows) or 0)
+    if not isinstance(silence, dict):
+        silence = {}
+    silent_rows = [s for s in (silence.get("silent") or []) if isinstance(s, dict)]
+    silent_n = safe_int(silence.get("silent_count"), len(silent_rows))
     spoke = spoke_institutions_for_stage(iss)
-    spoke_n = len(spoke) or int(silence.get("spoke_count") or iss.get("source_count") or 0)
+    spoke_n = len(spoke) or safe_int(silence.get("spoke_count"), safe_int(iss.get("source_count")))
 
     spoke_bits: list[str] = []
     for s in spoke:
@@ -807,15 +875,18 @@ def fight_theater_arc_html(iss: dict) -> str:
 
 def issue_stage_html(iss: dict, continuity: dict | None = None, *, panel_id: str = "", faces: dict | None = None) -> str:
     """Fight theater: calm confrontation — institution voices + silence arc first."""
+    iss = iss if isinstance(iss, dict) else {}
     q = esc(iss.get("question") or "Issue")
     topic_obj = iss.get("topic") or {}
     topic = topic_obj.get("topic") if isinstance(topic_obj, dict) else topic_obj
     topic = topic or "other"
     remix = bool(iss.get("media_remix"))
     silence = iss.get("silence") or {}
-    silent_n = int(silence.get("silent_count") or 0)
-    spoke_n = len(spoke_institutions_for_stage(iss)) or int(
-        silence.get("spoke_count") or iss.get("source_count") or 0
+    if not isinstance(silence, dict):
+        silence = {}
+    silent_n = safe_int(silence.get("silent_count"))
+    spoke_n = len(spoke_institutions_for_stage(iss)) or safe_int(
+        silence.get("spoke_count"), safe_int(iss.get("source_count"))
     )
     remix_note = ""
     if remix:
@@ -834,6 +905,8 @@ def issue_stage_html(iss: dict, continuity: dict | None = None, *, panel_id: str
     arc = fight_theater_arc_html(iss)
     panels = []
     for t in (iss.get("tensions") or [])[:4]:
+        if not isinstance(t, dict):
+            continue
         label = esc(
             str(
                 t.get("institution_name")
@@ -848,10 +921,14 @@ def issue_stage_html(iss: dict, continuity: dict | None = None, *, panel_id: str
         )
         items_html = []
         for it in (t.get("items") or [])[:3]:
+            if not isinstance(it, dict):
+                continue
             vface = face_img(it.get("candidate_id"), faces)
             claims_html = ""
             claim_bits = []
             for cl in (it.get("claims") or [])[:2]:
+                if not isinstance(cl, dict):
+                    continue
                 cq = esc((cl.get("quote") or "")[:160])
                 if not cq:
                     continue
@@ -915,6 +992,7 @@ def issue_stage_html(iss: dict, continuity: dict | None = None, *, panel_id: str
 
 def near_rail_item(c: dict, continuity: dict | None = None, faces: dict | None = None, *, pin: bool = True) -> str:
     """Compact Near me approach for the persistent right rail."""
+    c = c if isinstance(c, dict) else {}
     title = esc(c.get("title") or "(no title)")
     url = esc(link_url(c.get("url")))
     source = esc(c.get("source_name") or c.get("source_id") or "")
@@ -957,10 +1035,14 @@ def near_rail_item(c: dict, continuity: dict | None = None, faces: dict | None =
 
 def news_deck_html(c: dict, continuity: dict | None = None) -> str:
     """Mobile deck card for Near me."""
+    c = c if isinstance(c, dict) else {}
     title = esc(c.get("title") or "(no title)")
     url = esc(link_url(c.get("url")))
     source = esc(c.get("source_name") or c.get("source_id") or "")
-    score = c.get("rank_score", 0)
+    try:
+        score = float(c.get("rank_score") or 0)
+    except (TypeError, ValueError):
+        score = 0.0
     geo = esc(display_geo(c))
     chips = chip_topics(c) + chip_units(c)
     cont = ""
@@ -999,9 +1081,10 @@ def cap_slice(
     pin_at: str = "start",
 ) -> tuple[list[dict], int]:
     """pin_at: start = crown pins; end = keep findable without leading (UI v2.8)."""
+    items = [c for c in (items or []) if isinstance(c, dict)]
+    pins = [c for c in (pin_items or []) if isinstance(c, dict)]
     total = len(items)
     ordered = impact_first(items) if impact_prefer else list(items)
-    pins = list(pin_items or [])
     if cap is None:
         return ordered, total
     pin_urls = {(c.get("url") or "") for c in pins}
@@ -1059,7 +1142,8 @@ def archive_block(
 
 def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None = None, clock: dict | None = None) -> str:
     clock = clock or {"ranked_at": generated_at, "sources": "sources.yaml"}
-    issues = issues or []
+    ranked = [c for c in (ranked or []) if isinstance(c, dict)]
+    issues = [i for i in (issues or []) if isinstance(i, dict)]
     continuity = build_continuity(issues, ranked)
     faces_map = load_faces()
     buckets = {"near": [], "province": [], "linked": []}
@@ -1184,6 +1268,7 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
         topic_obj = iss.get("topic") or {}
         topic = topic_obj.get("topic") if isinstance(topic_obj, dict) else topic_obj
         topic = esc(str(topic or "other"))
+        silence = iss.get("silence") if isinstance(iss.get("silence"), dict) else {}
         compass_bits.append(
             f"<button type='button' class='fight-btn' data-i='{i}' data-mode='fight'>"
             f"<span class='fight-q'>{q}</span>"
@@ -1194,8 +1279,8 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
                 else " · media remix"
             )
             + (
-                f" · silent {(iss.get('silence') or {}).get('silent_count', 0)}"
-                if (iss.get("silence") or {}).get("silent_count") is not None
+                f" · silent {silence.get('silent_count', 0)}"
+                if silence.get("silent_count") is not None
                 else ""
             )
             + "</span>"

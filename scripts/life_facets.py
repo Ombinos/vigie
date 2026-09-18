@@ -87,7 +87,11 @@ def issue_topic(iss: dict | None) -> str:
 def unit_kinds_of(approach: dict) -> list[str]:
     kinds: list[str] = []
     seen: set[str] = set()
+    if not isinstance(approach, dict):
+        return kinds
     for u in approach.get("units") or []:
+        if not isinstance(u, dict):
+            continue
         k = str(u.get("kind") or "").strip()
         if k and k not in seen:
             seen.add(k)
@@ -99,17 +103,25 @@ def annotate_approaches(approaches: list[dict], issues: list[dict] | None = None
     """Attach topic + unit_kinds for facet scoring. Does not reorder."""
     by_id: dict[str, dict] = {}
     for iss in issues or []:
+        if not isinstance(iss, dict):
+            continue
         iid = str(iss.get("issue_id") or iss.get("scar") or "")
         if iid:
             by_id[iid] = iss
     out: list[dict] = []
     for ap in approaches or []:
+        if not isinstance(ap, dict):
+            continue
         row = dict(ap)
         iid = str(row.get("issue_id") or "")
         if "topic" not in row or not row.get("topic"):
             row["topic"] = issue_topic(by_id.get(iid))
         row["unit_kinds"] = unit_kinds_of(row)
-        row["store_index"] = int(row.get("index") if row.get("index") is not None else len(out))
+        try:
+            default_index = int(row.get("index")) if row.get("index") is not None else len(out)
+        except (TypeError, ValueError):
+            default_index = len(out)
+        row["store_index"] = default_index
         out.append(row)
     return out
 
@@ -118,6 +130,8 @@ def facet_score(approach: dict, active_facets: list[str]) -> float:
     """Presentation score only — never a rank_score component."""
     ids = normalize_facet_ids(active_facets)
     if not ids:
+        return 0.0
+    if not isinstance(approach, dict):
         return 0.0
     topic = str(approach.get("topic") or "other")
     kinds = set(approach.get("unit_kinds") or unit_kinds_of(approach))

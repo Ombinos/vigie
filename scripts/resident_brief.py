@@ -186,7 +186,11 @@ def prepare_items(ranked: list[dict], now: datetime) -> tuple[list[dict], int]:
         geo_block = enrich.get("geo")
         geo = (geo_block.get("geo") if isinstance(geo_block, dict) else None) or item.get("display_geo", "linked")
         topics_block = enrich.get("topics")
-        topic_ids = [t.get("topic", "other") for t in (topics_block if isinstance(topics_block, list) else []) if isinstance(t, dict)] or ["other"]
+        topic_ids = [
+            str(t.get("topic") if t.get("topic") is not None else "other")
+            for t in (topics_block if isinstance(topics_block, list) else [])
+            if isinstance(t, dict)
+        ] or ["other"]
         summary = plain(item.get("summary"))[:SUMMARY_CAP]
         text = folded(title + " " + summary)
         areas = [key for key, (_, pattern) in AREAS.items() if geo == "quebec-city" and re.search(pattern, text)]
@@ -224,7 +228,7 @@ NEST_LABELS = {"quebec-city": "Québec et environs", "quebec": "Au Québec", "li
 
 
 def dossier_nest(geo_focus: object) -> str:
-    geos = geo_focus or []
+    geos = geo_focus if isinstance(geo_focus, list) else []
     if "quebec-city" in geos:
         return "quebec-city"
     if "quebec" in geos:
@@ -235,14 +239,26 @@ def dossier_nest(geo_focus: object) -> str:
 def dossier_units(issue: dict, eligible: dict) -> list[str]:
     """Checkable units already on dossier items in this brief — never invented."""
     raws: list[str] = []
+    if not isinstance(issue, dict):
+        return raws
     seen: set[str] = set()
     for tension in issue.get("tensions") or []:
+        if not isinstance(tension, dict):
+            continue
         for entry in tension.get("items") or []:
-            row = eligible.get(entry.get("candidate_id"))
-            if not row:
+            if not isinstance(entry, dict):
                 continue
-            for impact in (row.get("enrich") or {}).get("impacts") or []:
+            row = eligible.get(entry.get("candidate_id"))
+            if not isinstance(row, dict):
+                continue
+            enrich = row.get("enrich")
+            enrich = enrich if isinstance(enrich, dict) else {}
+            for impact in enrich.get("impacts") or []:
+                if not isinstance(impact, dict):
+                    continue
                 for unit in impact.get("units") or []:
+                    if not isinstance(unit, dict):
+                        continue
                     raw = str(unit.get("raw") or "").strip()
                     if raw and raw not in seen:
                         seen.add(raw)
@@ -280,11 +296,12 @@ def dossier_html(issue: dict, eligible: dict) -> str:
 
     Grouping is never a contradiction; absence is never proven editorial silence;
     several media are never several independent confirmations. Judgment stays with
-    the reader.
+    the reader. A malformed store entry is skipped, never fatal.
     """
+    issue = issue if isinstance(issue, dict) else {}
     question = esc(issue.get("question") or "Sujet suivi")
     nest = dossier_nest(issue.get("geo_focus"))
-    tensions = issue.get("tensions") or []
+    tensions = [t for t in (issue.get("tensions") or []) if isinstance(t, dict)]
     spoke: list[str] = []
     for tension in tensions:
         name = str(tension.get("institution_name") or "").strip()
@@ -295,6 +312,8 @@ def dossier_html(issue: dict, eligible: dict) -> str:
     for tension in tensions:
         inst = esc(str(tension.get("institution_name") or "Source").strip())
         for entry in (tension.get("items") or [])[:2]:
+            if not isinstance(entry, dict):
+                continue
             url = safe_url(entry.get("url"))
             if not url:
                 continue
@@ -310,10 +329,12 @@ def dossier_html(issue: dict, eligible: dict) -> str:
         + "</p>"
     ) if spoke else ""
     silence = issue.get("silence") or {}
+    if not isinstance(silence, dict):
+        silence = {}
     quiet = [
         str(s.get("institution_name") or s.get("source_id") or "").strip()
         for s in (silence.get("silent") or [])
-        if (s.get("source_kind") or "").lower() == "official"
+        if isinstance(s, dict) and (s.get("source_kind") or "").lower() == "official"
     ]
     quiet = [n for n in quiet if n]
     silence_line = (

@@ -198,15 +198,22 @@ def silence_map(spoke_institutions: set[str], chancellery: list[dict]) -> dict:
 
 
 def topic_of(c: dict) -> str:
+    if not isinstance(c, dict):
+        return "other"
     topics = ((c.get("enrich") or {}).get("topics") or [])
-    if topics:
+    if topics and isinstance(topics[0], dict):
         return topics[0].get("topic") or "other"
     return "other"
 
 
 def geo_of(c: dict) -> str:
-    eg = ((c.get("enrich") or {}).get("geo") or {}).get("geo")
-    return eg or c.get("geo") or "unknown"
+    if not isinstance(c, dict):
+        return "unknown"
+    en = c.get("enrich") or {}
+    geo_block = en.get("geo") if isinstance(en, dict) else None
+    if isinstance(geo_block, dict) and geo_block.get("geo"):
+        return geo_block["geo"]
+    return c.get("geo") or "unknown"
 
 
 def issue_id(scar: str, source_count: int = 0) -> str:

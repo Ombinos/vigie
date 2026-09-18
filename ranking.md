@@ -72,7 +72,8 @@ Half-life **36 hours**.
 recency = 0.5 ** (age_hours / 36)
 ```
 
-Missing `published_at` → treat as fetched_at if present, else `recency = 0.2`.
+Missing `published_at` → `recency = 0`. Download/collection time is never publication
+time (a fetched_at fallback would let old undated news look fresh).
 
 ### has_contradiction / impact_weight
 
