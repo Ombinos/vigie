@@ -24,13 +24,14 @@ python -X utf8 scripts/pipeline.py --render-only  # render existing enriched dat
 python -X utf8 scripts/verify.py --rebuild        # tests + offline rebuild + release checks
 python -X utf8 scripts/verify.py --code-only      # code checks without downloaded data
 python -X utf8 scripts/check_claims.py            # extraction provenance, not truth verification
+python -X utf8 scripts/refresh.py                 # collect, verify, deploy to production (Vercel)
 ```
 
-Verification stages a complete release in `deploy/public/`, checks links and asset hashes, and tests real HTTP GET/HEAD responses. It does not upload or schedule refreshes. A clean checkout needs one online pipeline run to produce real data.
+Verification stages a complete release in `deploy/public/`, checks links and asset hashes, and tests real HTTP GET/HEAD responses. It does not upload. `scripts/refresh.py` is the upload path — pipeline → verify → re-link → `vercel deploy --prod` — and the Windows scheduled task `Vigie Refresh` runs it every 6 hours (interactive-only; lock file against overlaps; log at `data/ops/refresh.log`; any failing step leaves the previous production site up). A clean checkout needs one online pipeline run to produce real data.
 
 ## Product surfaces
 
-- `/`: French resident brief. Six articles per step, source excerpts, comparisons, place/topic/search filters, saved articles and an explicit reading marker. Two honest change surfaces: “Travaux et entraves” (official WZDX roadwork data, attributed, never ranked with articles) and “Depuis la dernière édition” (dossier-level edition diff, shown only when a prior edition exists).
+- `/`: French resident brief. Six articles per step, source excerpts, comparisons, place/topic/search filters, saved articles and an explicit reading marker. Two honest change surfaces: “Travaux et entraves” (official WZDX roadwork data, attributed, never ranked with articles) and “Depuis la dernière édition” (dossier-level edition diff, shown only when a prior edition exists). Each dossier also carries its durable collection history (“Suivi depuis…”: first seen, editions seen/missed — one edition is one collection snapshot, and a missed edition is an absence, never a resolution).
 - `/explorer.html`: older experimental evidence workbench, retained for inspection with explicit limitations.
 - `/morning.html`: experimental dossier companion from the same issue store.
 

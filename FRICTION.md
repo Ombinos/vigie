@@ -76,17 +76,22 @@ Not a resident substitute.
 ## Resident walkthrough protocol (required for Phase 0 close)
 
 **Goal:** five Quebec City–life residents (or near-daily visitors), not co-founders.  
-**Task:** open the lookout cold; think aloud ~5–8 minutes; no coaching on “Approaches.”
+**Task:** open the live French brief cold; think aloud ~5–8 minutes; no coaching.  
+**Surface:** the deployed front door — https://vigie-deemto.vercel.app (stable production alias). Aligned 2026-09-18: this script replaces the old English workbench walk (Arrival/Approaches/Life facets/Stage); the questions now follow the live brief’s sections.
 
 ### Script (same for R1–R5)
 
-1. Open `/` on their phone or laptop (note which).
-2. Ask: “Without scrolling for a mission — what is this?”
-3. Ask: “What is approaching your life here, if anything?”
-4. Ask: “Who spoke / who didn’t — can you tell?”
-5. Ask: “What would you tap first? What would you ignore?”
-6. Optional: toggle one Life facet; note confusion or clarity.
-7. Stop before pitching Vision.
+1. Open `/` on their phone or laptop (note which). No tab of the site already open.
+2. Ask: “Sans faire défiler — qu’est-ce que c’est ?” (“Without scrolling — what is this?”)
+3. **Le point** (`#essentiel`): “What does this tell you about your city today?”
+4. **Ce qui a changé** (`#changements`): “Can you tell what moved since the last edition? Does the ‘Suivi depuis…’ line on a dossier mean anything to you?”
+5. **Travaux et entraves** (`#travaux`): “You’re crossing town tomorrow — what here would help? What’s missing?”
+6. **Les dossiers** (`#dossiers`): “Who spoke / who stayed silent — can you tell? Does the silence line change your trust?”
+7. **Repères utiles** (`#agir`): “Would you tap any of these? Which? Why?”
+8. Ask: “What would you tap first? What would you ignore?”
+9. Stop before pitching Vision.
+
+Sessions may be remote (screen share) or in person. Record only with consent; quotes land in the table below only with permission. No session, no row — the table stays empty rather than filled with invented residents (kill-list law).
 
 ### Record row (fill only with real sessions)
 
