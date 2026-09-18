@@ -10,7 +10,11 @@ also accumulates a durable per-event history (`event_history`: first seen,
 collections seen/missed — presence facts only, never a timeline of the works
 themselves) under the same forward-only, method-guarded discipline: one
 collection is one distinct fetched_at snapshot, so offline reuse never
-inflates counts, and an absence is never an end.
+inflates counts, and an absence is never an end. The diff relays two City
+revision signals literally: a revised end date carries the direction of the
+City's own revision (later/earlier), and a removed event still carried by the
+feed under an ended status (completed/cancelled/archived) carries that literal
+declaration — a declaration, never a verified resolution.
 
 Event identity is the GeoJSON feature-level `id` (e.g. "ACL-20260917-EC-001"),
 verified stable across collections. The WZDX `data_source_id` property is
@@ -156,8 +160,14 @@ def is_active(event: dict, now: datetime) -> bool:
     return end >= now
 
 
-def diff_events(current: list[dict], previous: list[dict] | None, *, now: datetime) -> dict:
-    """Honest collection diff. New ≠ important; changed ≠ worse; removed ≠ ended."""
+def diff_events(current: list[dict], previous: list[dict] | None, *, now: datetime,
+                ended: dict | None = None) -> dict:
+    """Honest collection diff. New ≠ important; changed ≠ worse; removed ≠ ended.
+
+    `ended` maps event ids to the City's own ended-status vocabulary for events
+    the feed still carries this collection; a removal carrying such a status is
+    a literal City declaration, never a verified resolution.
+    """
     empty = {"has_previous": False, "new": [], "removed": [], "changed": [],
              "new_count": 0, "removed_count": 0, "changed_count": 0,
              "note": "Aucune collecte précédente comparable."}
@@ -176,17 +186,29 @@ def diff_events(current: list[dict], previous: list[dict] | None, *, now: dateti
     removed = []
     for eid in sorted(set(prev) - set(cur)):
         end = _parse_iso(prev[eid].get("end_date"))
-        removed.append({
+        entry = {
             "event_id": eid, "road_names": prev[eid].get("road_names") or [],
             "event_type": prev[eid].get("event_type"), "change": "removed", "status": "proposed",
             "official_end_date_passed": bool(end is not None and end < now),
-        })
+        }
+        declared = str((ended or {}).get(eid) or "").strip().lower()
+        if declared:
+            entry["city_declared_status"] = declared
+        removed.append(entry)
     changed = []
     for eid in sorted(set(cur) & set(prev)):
         fields = [f for f in COMPARE_FIELDS if cur[eid].get(f) != prev[eid].get(f)]
         if fields:
-            changed.append({"event_id": eid, "road_names": cur[eid].get("road_names") or [],
-                            "fields": fields, "change": "changed", "status": "proposed"})
+            entry = {"event_id": eid, "road_names": cur[eid].get("road_names") or [],
+                     "fields": fields, "change": "changed", "status": "proposed"}
+            if "end_date" in fields:
+                cur_end = _parse_iso(cur[eid].get("end_date"))
+                prev_end = _parse_iso(prev[eid].get("end_date"))
+                if cur_end is not None and prev_end is not None and cur_end != prev_end:
+                    # Direction of the City's own revision. Postponed ≠ extended
+                    # works; advanced ≠ finished. Unparseable dates stay directionless.
+                    entry["end_date_moved"] = "later" if cur_end > prev_end else "earlier"
+            changed.append(entry)
     return {
         "has_previous": True, "new": new, "removed": removed, "changed": changed,
         "new_count": len(new), "removed_count": len(removed), "changed_count": len(changed),
@@ -426,7 +448,12 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
         fetched_ats.append(fetched_at)
     store_fetched_at = min(fetched_ats)
     active = sorted((e for e in all_events if e.get("active")), key=lambda e: str(e["event_id"]))
-    diff = diff_events(active, previous, now=store_fetched_at)
+    ended_statuses = {
+        str(e["event_id"]): str(e.get("event_status"))
+        for e in all_events
+        if str(e.get("event_status") or "").lower() in ENDED_STATUSES
+    }
+    diff = diff_events(active, previous, now=store_fetched_at, ended=ended_statuses)
     history = update_event_history(
         load_event_history(store_path), active, store_fetched_at.isoformat()
     )

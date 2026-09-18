@@ -462,7 +462,7 @@ def _rw_history_line(event: dict, history: dict) -> str:
     return f'<p class="rw-history fine">{text}</p>'
 
 
-def _rw_card(event: dict, new_ids: set, changed_ids: set, has_previous: bool,
+def _rw_card(event: dict, new_ids: set, changed_by_id: dict, has_previous: bool,
              history: dict | None = None) -> str:
     eid = str(event.get("event_id"))
     impact = str(event.get("vehicle_impact") or "")
@@ -479,8 +479,17 @@ def _rw_card(event: dict, new_ids: set, changed_ids: set, has_previous: bool,
     if has_previous:
         if eid in new_ids:
             tags += '<span class="rw-tag rw-t-new">Nouvelle</span>'
-        if eid in changed_ids:
-            tags += '<span class="rw-tag rw-t-chg">Modifiée</span>'
+        change = changed_by_id.get(eid)
+        if isinstance(change, dict):
+            # The City's own date revision, relayed with its direction. Postponed
+            # is not extended works; advanced is not finished.
+            moved = change.get("end_date_moved")
+            if moved == "later":
+                tags += '<span class="rw-tag rw-t-post">Fin reportée</span>'
+            elif moved == "earlier":
+                tags += '<span class="rw-tag rw-t-adv">Fin avancée</span>'
+            else:
+                tags += '<span class="rw-tag rw-t-chg">Modifiée</span>'
     kicker_html = f'<p class="rw-kicker">{" · ".join(esc(k) for k in kicker)}</p>' if kicker else ""
     desc = plain(event.get("description"))
     if len(desc) > 200:
@@ -515,7 +524,9 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
     ordered.sort(key=lambda e: str(e.get("update_date") or ""), reverse=True)
     ordered.sort(key=lambda e: RW_SEVERITY.get(str(e.get("vehicle_impact") or ""), 6))
     new_ids = {e.get("event_id") for e in (diff.get("new") or []) if isinstance(e, dict)}
-    changed_ids = {e.get("event_id") for e in (diff.get("changed") or []) if isinstance(e, dict)}
+    changed_by_id = {
+        e.get("event_id"): e for e in (diff.get("changed") or []) if isinstance(e, dict)
+    }
     hist_doc = rw.get("event_history") if isinstance(rw.get("event_history"), dict) else {}
     # Method guard mirrors ingest_wzdx.HISTORY_METHOD: a foreign-history store
     # renders no collection facts rather than misreading another model's record.
@@ -526,7 +537,7 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
         else {}
     )
     cards = "".join(
-        _rw_card(e, new_ids, changed_ids, has_previous, history)
+        _rw_card(e, new_ids, changed_by_id, has_previous, history)
         for e in ordered[:RW_DISPLAY_CAP]
     )
     count = len(ordered)
@@ -558,6 +569,25 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
                 "pas nécessairement terminée.</span>" if diff.get("removed_count") else ""
             )
             changes = f'<p class="rw-changes">Depuis la dernière collecte : {" · ".join(bits)}.{removed_note}</p>'
+        declared: dict[str, int] = {}
+        for entry in diff.get("removed") or []:
+            if not isinstance(entry, dict):
+                continue
+            state = str(entry.get("city_declared_status") or "").strip()
+            if state:
+                declared[state] = declared.get(state, 0) + 1
+        if declared:
+            # The City's own ended vocabulary, relayed literally: a declaration,
+            # never a resolution verified by Vigie.
+            parts = ", ".join(
+                f'{n} entrave{"s" if n > 1 else ""} « {esc(state)} »'
+                for state, n in sorted(declared.items())
+            )
+            changes += (
+                f'<p class="rw-ended">La Ville déclare depuis la dernière collecte : {parts}. '
+                '<span class="fine">Statuts officiels relayés tels quels — une déclaration, '
+                "pas une vérification sur le terrain.</span></p>"
+            )
     stale_html = (
         '<p class="rw-stale warning">Collecte à actualiser : ces données ont plus de six '
         "heures. Vérifiez la carte officielle avant de partir.</p>" if stale else ""

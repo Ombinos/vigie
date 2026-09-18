@@ -56,6 +56,9 @@
 .rw-tag{font-size:9px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;border-radius:3px;padding:3px 7px;white-space:nowrap}
 .rw-t-new{color:#fff;background:var(--accent)}
 .rw-t-chg{color:var(--accent);background:var(--light)}
+.rw-t-post{color:#fff;background:var(--blue)}
+.rw-t-adv{color:var(--blue);background:var(--light)}
+.rw-ended{font-size:12px;line-height:1.6;color:var(--muted);margin:0 0 14px}
 .rw-kicker{font-size:11px;font-weight:650;letter-spacing:.4px;text-transform:uppercase;color:var(--blue);margin:5px 0 0}
 .rw-dates{font-size:12px;color:var(--muted);margin:4px 0 0}
 .rw-dates time{color:var(--blue);font-weight:600}
