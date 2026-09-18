@@ -46,6 +46,10 @@ _None yet._ Do not invent a Quebec City photo. Empty `public/place/` is correct.
 
 All honor `prefers-reduced-motion: reduce`.
 
+## Preview images (resident brief)
+
+Publisher `og:image` only, fetched at collection time (`scripts/fetch_brief_media.py`) and served from our own origin — reading the brief never contacts a publisher. Bytes are sniffed, never trusted: no SVG, no mislabeled HTML, 700 KB cap. A silent publisher means no image — not a filler, never stock. Same treatment for every card that has one: full-width strip, 1200/630, hairline `--line` border, `object-fit: cover`; no invented hierarchy. New articles get their image on the next refresh; the lag is honest, placeholders are not.
+
 ## Decision log
 
 | Date | Decision | Owner |
@@ -53,3 +57,4 @@ All honor `prefers-reduced-motion: reduce`.
 | 2026-09-16 | Ship law + Arrival polish; no invented QC photo; nest wash only | Bucky + Inventor |
 | 2026-09-17 | Verification: composition order; silence chrome de-purpled to slate; place/ empty; tests lock Do/Do-not | Bucky + Inventor |
 | TBD | Add full-bleed only with a real named place image in `public/place/` and a row above | Inventor |
+| 2026-09-18 | Brief preview images: publisher og:image, locally re-hosted and sniffed; never stock, never invented | Bucky + Inventor |

@@ -75,3 +75,5 @@
 .rw-attr a{color:var(--blue);text-decoration:underline;text-underline-offset:3px}
 @media(max-width:600px){.roadworks{padding-top:26px}.rw-roads{font-size:15px}.rw-item{padding-left:10px}}
 @media print{.roadworks{padding-bottom:0}.rw-map a:after,.rw-attr a:after{content:' (' attr(href) ')';font:9px var(--sans);overflow-wrap:anywhere}}
+.story-media{margin:2px 0 15px}
+.story-media img{display:block;width:100%;aspect-ratio:1200/630;object-fit:cover;border:1px solid var(--line);background:var(--light)}

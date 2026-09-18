@@ -360,13 +360,15 @@ class PipelineWiring(unittest.TestCase):
         self.assertEqual(pipeline.SCRIPTS[0], "ingest_rss.py")
         self.assertEqual(pipeline.SCRIPTS[1], "ingest_wzdx.py")
 
-    def test_offline_passes_flag_to_wzdx_only(self):
+    def test_offline_flag_reaches_only_network_fetch_steps(self):
         with patch("sys.argv", ["pipeline.py", "--offline"]), patch.object(pipeline, "run") as run:
             self.assertEqual(pipeline.main(), 0)
         calls = [(c.args[0], c.args[1:]) for c in run.call_args_list]
         self.assertIn(("ingest_wzdx.py", ("--offline",)), calls)
         for name, extra in calls:
-            if name != "ingest_wzdx.py":
+            if name in ("ingest_wzdx.py", "fetch_brief_media.py"):
+                self.assertEqual(extra, ("--offline",))
+            else:
                 self.assertEqual(extra, ())
 
 

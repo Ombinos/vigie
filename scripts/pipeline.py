@@ -25,6 +25,7 @@ SCRIPTS = [
     "normalize.py",
     "enrich.py",
     "cluster_issues.py",
+    "fetch_brief_media.py",
     "rank_display.py",
 ]
 
@@ -48,7 +49,7 @@ def main() -> int:
     selected = SCRIPTS[-1:] if args.render_only else SCRIPTS[1:] if args.offline else SCRIPTS
     print("Vigie pipeline" + (" (offline snapshots)" if args.offline else " (render existing store)" if args.render_only else " (refresh sources)"))
     for name in selected:
-        if args.offline and name == "ingest_wzdx.py":
+        if args.offline and name in ("ingest_wzdx.py", "fetch_brief_media.py"):
             run(name, "--offline")
         else:
             run(name)

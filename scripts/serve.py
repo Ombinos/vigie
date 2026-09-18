@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import functools
 import mimetypes
+import re
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,12 +15,22 @@ from stage_public import METHODS
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "public"
 METHOD_FILES = {f"/{name}": ROOT / name for name in METHODS}
+MEDIA_DIR = ROOT / "data" / "media" / "brief"
+MEDIA_NAME = re.compile(r"[a-f0-9]{20}\.(?:jpg|jpeg|png|webp|avif|gif)")
+MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+               ".webp": "image/webp", ".avif": "image/avif", ".gif": "image/gif"}
 
 
 class VigieHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory=None, methods=None, **kwargs):
+    def __init__(self, *args, directory=None, methods=None, media=None, **kwargs):
         self.public_root = Path(directory or PUBLIC).resolve()
         self.methods = METHOD_FILES if methods is None and directory is None else (methods or {})
+        if media is not None:
+            self.media_root = Path(media)
+        elif directory is None:
+            self.media_root = MEDIA_DIR  # dev preview; staged releases carry media/ themselves
+        else:
+            self.media_root = None
         super().__init__(*args, directory=str(self.public_root), **kwargs)
 
     def end_headers(self) -> None:
@@ -46,6 +57,20 @@ class VigieHandler(SimpleHTTPRequestHandler):
             file = target.open("rb")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(target.stat().st_size))
+            self.end_headers()
+            return file
+        if self.media_root is not None and path.startswith("/media/"):
+            name = path[len("/media/"):]
+            target = self.media_root / name
+            if (not MEDIA_NAME.fullmatch(name) or target.is_symlink()
+                    or not target.is_file()
+                    or target.resolve().parent != self.media_root.resolve()):
+                self.send_error(404, "Not found")
+                return None
+            file = target.open("rb")
+            self.send_response(200)
+            self.send_header("Content-Type", MEDIA_TYPES.get(target.suffix.lower(), "application/octet-stream"))
             self.send_header("Content-Length", str(target.stat().st_size))
             self.end_headers()
             return file
@@ -76,15 +101,27 @@ class VigieHandler(SimpleHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
 
+def build_handler(directory: Path | None = None):
+    """Dev preview (None): repo public/ + method files + the local media store.
+
+    A staged directory is self-contained - it carries its own media/ and needs
+    no method routes - so it must not be wired to the dev media store.
+    """
+    if directory is None:
+        return functools.partial(VigieHandler, media=MEDIA_DIR)
+    return functools.partial(VigieHandler, directory=directory, methods={})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--directory", type=Path, help="Serve an existing staged static directory")
     args = parser.parse_args()
-    directory = args.directory.resolve() if args.directory else PUBLIC
+    staged = args.directory.resolve() if args.directory else None
+    directory = staged or PUBLIC
     if not (directory / "index.html").is_file():
         parser.exit(1, f"Missing {directory / 'index.html'}. Rebuild the site first.\n")
-    handler = functools.partial(VigieHandler, directory=directory, methods={} if args.directory else METHOD_FILES)
+    handler = build_handler(staged)
     with ThreadingHTTPServer(("127.0.0.1", args.port), handler) as httpd:
         print(f"Vigie: http://127.0.0.1:{httpd.server_port}/", flush=True)
         print(f"Serving {directory}. Ctrl+C to stop.", flush=True)

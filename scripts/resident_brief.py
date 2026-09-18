@@ -131,6 +131,35 @@ def latest_run() -> dict:
     return {}
 
 
+MEDIA_MANIFEST = ROOT / "data" / "media" / "brief_manifest.json"
+_MEDIA_FILE = re.compile(r"[a-f0-9]{20}\.(?:jpg|jpeg|png|webp|avif|gif)")
+
+
+def load_brief_media() -> dict:
+    """uid -> local filename for publisher preview images (brief-media-v1).
+
+    Images are fetched at collection time and served from this site: reading
+    the brief never contacts a publisher. A foreign or corrupt manifest
+    renders no images rather than guessing, and only strict filenames pass,
+    so a hostile store can never aim an <img> outside /media/.
+    """
+    try:
+        doc = json.loads(MEDIA_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict) or doc.get("method") != "brief-media-v1":
+        return {}
+    media = doc.get("media")
+    if not isinstance(media, dict):
+        return {}
+    return {
+        str(uid): entry["file"]
+        for uid, entry in media.items()
+        if isinstance(entry, dict) and isinstance(entry.get("file"), str)
+        and _MEDIA_FILE.fullmatch(entry["file"])
+    }
+
+
 def prepare_items(ranked: list[dict], now: datetime) -> tuple[list[dict], int]:
     """Preserve rank order; age gate by publication, never fetch time."""
     rows, excluded, seen = [], 0, set()
@@ -658,8 +687,15 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
     )
 
 
-def article_html(item: dict, index: int, related: list[dict]) -> str:
+def article_html(item: dict, index: int, related: list[dict], media: dict | None = None) -> str:
     title = esc(item["title"])
+    media_file = media.get(item["uid"]) if isinstance(media, dict) else None
+    if not isinstance(media_file, str) or not _MEDIA_FILE.fullmatch(media_file):
+        media_file = None
+    media_html = (
+        f'<div class="story-media"><img src="/media/{media_file}" alt="" loading="lazy" decoding="async"></div>'
+        if media_file else ""
+    )
     geo = {"quebec-city": "Québec et environs", "quebec": "Au Québec", "linked": "Ailleurs"}.get(item["geo"], "Ailleurs")
     topic = TOPICS.get(item["topics"][0], "Vie locale")
     source = esc(item.get("source_name") or item.get("source_id") or "Source")
@@ -674,7 +710,7 @@ def article_html(item: dict, index: int, related: list[dict]) -> str:
         place_reason = "Ce document provient d’une source officielle locale."
     return f'''<article class="story" id="article-{item['uid']}" data-id="{item['uid']}" data-geo="{esc(item['geo'])}" data-topics="{esc(' '.join(item['topics']))}" data-areas="{esc(' '.join(item['areas']))}" data-search="{esc(folded(item['title'] + ' ' + summary + ' ' + str(item.get('source_name', ''))))}" data-published="{esc(item['published'])}">
       <div class="story-number" aria-hidden="true">{index:02}</div><div class="story-body">
-      <div class="story-kicker"><span>{esc(topic)}</span><span>{geo}</span>{kind}<span class="new-label" hidden>Nouveau dans la collecte</span></div>
+      {media_html}<div class="story-kicker"><span>{esc(topic)}</span><span>{geo}</span>{kind}<span class="new-label" hidden>Nouveau dans la collecte</span></div>
       <h3><a href="{esc(item['url'])}" rel="noopener noreferrer">{title}<span class="arrow" aria-hidden="true"> ↗</span></a></h3>
       <p class="byline">{source}<span aria-hidden="true"> · </span>{date_html(item['published'])}{'<span class="language">Article en anglais</span>' if item.get('language') == 'en' else ''}</p>
       {excerpt_html}
@@ -683,13 +719,17 @@ def article_html(item: dict, index: int, related: list[dict]) -> str:
       </div></article>'''
 
 
-def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None, roadworks: dict | None = None) -> str:
+def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None, roadworks: dict | None = None, media: dict | None = None) -> str:
     now = parse_date(generated_at) or datetime.now(timezone.utc)
     rows, excluded = prepare_items(ranked, now)
     run = latest_run() if run is None else run
+    if media is None:
+        media = load_brief_media()
+    elif not isinstance(media, dict):
+        media = {}
     status = collection_status(run, now)
     eligible = {r.get("id"): r for r in rows}
-    stories = "".join(article_html(r, n + 1, related_sources(r, issues, eligible)) for n, r in enumerate(rows))
+    stories = "".join(article_html(r, n + 1, related_sources(r, issues, eligible), media) for n, r in enumerate(rows))
     areas = "".join(f'<option value="{esc(k)}">{esc(v[0])}</option>' for k, v in AREAS.items())
     topics = (("all", "Tout"), ("transport", "Se déplacer"), ("housing", "Se loger"), ("health", "Santé"), ("law", "Vie publique"), ("culture", "Culture"))
     filters = "".join(f'<button type="button" data-topic="{k}" aria-pressed="{"true" if k == "all" else "false"}">{v}</button>' for k, v in topics)
@@ -720,5 +760,5 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 {change_section(ledger)}
 {dossiers_section(issues, eligible)}
 <section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>
-<section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
+<section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><p>Les images d’aperçu proviennent des éditeurs (og:image) : Vigie les récupère au moment de la collecte et les sert depuis ce site — votre navigateur ne contacte aucun éditeur en lisant ce point. Un article dont l’éditeur ne publie pas d’image reste sans image : aucune image n’est inventée.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
 <footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span></footer><div id="toast" role="status" aria-live="polite"></div></body></html>'''

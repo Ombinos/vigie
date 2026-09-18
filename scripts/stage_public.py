@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 from html.parser import HTMLParser
@@ -23,6 +24,9 @@ ASSET_EXTENSIONS = {
     ".webp", ".avif", ".gif", ".ico", ".woff", ".woff2", ".txt",
     ".webmanifest", ".xml", ".json",
 }
+# Locally served publisher preview images (scripts/fetch_brief_media.py).
+MEDIA_NAME = re.compile(r"[a-f0-9]{20}\.(?:jpg|jpeg|png|webp|avif|gif)")
+MEDIA_MAX_BYTES = 700_000
 
 
 class PageLinks(HTMLParser):
@@ -132,6 +136,22 @@ def stage(root: Path = ROOT, output: Path = OUT) -> dict:
             shutil.copy2(source, target)
         for name in METHODS:
             shutil.copy2(root / name, temporary / name)
+        media_dir = root / "data" / "media" / "brief"
+        if media_dir.is_symlink():
+            raise ValueError("The media source directory cannot be a symlink")
+        if media_dir.is_dir():
+            for source in sorted(media_dir.iterdir()):
+                if source.name.startswith("."):
+                    continue  # a crashed fetch may leave a .part behind; pruning owns it
+                if source.is_symlink() or not source.is_file():
+                    raise ValueError(f"Unsafe media asset: {source.name}")
+                if not MEDIA_NAME.fullmatch(source.name):
+                    raise ValueError(f"Unsupported media asset: {source.name}")
+                if source.stat().st_size > MEDIA_MAX_BYTES:
+                    raise ValueError(f"Oversized media asset: {source.name}")
+                target = temporary / "media" / source.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
         errors = validate_site(temporary)
         if errors:
             raise ValueError("Invalid static site:\n" + "\n".join(errors))

@@ -416,6 +416,7 @@ class SecurityHeadersConfig(unittest.TestCase):
             csp = self.rules[source]["content-security-policy"]
             self.assertIn("default-src 'none'", csp)
             self.assertIn("script-src 'self'", csp)
+            self.assertIn("img-src 'self' data:;", csp)
             self.assertNotIn("unsafe-inline", csp)
             self.assertNotIn("fonts.googleapis", csp)
             self.assertIn("frame-ancestors 'none'", csp)
