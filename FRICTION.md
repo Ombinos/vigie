@@ -77,7 +77,7 @@ Not a resident substitute.
 
 **Goal:** five Quebec City–life residents (or near-daily visitors), not co-founders.  
 **Task:** open the live French brief cold; think aloud ~5–8 minutes; no coaching.  
-**Surface:** the deployed front door — https://vigie-deemto.vercel.app (stable production alias). Aligned 2026-09-18: this script replaces the old English workbench walk (Arrival/Approaches/Life facets/Stage); the questions now follow the live brief’s sections.
+**Surface:** the deployed front door — **https://vigieqc.com** (custom domain; the alias https://vigie-deemto.vercel.app also routes to production). Aligned 2026-09-18: this script replaces the old English workbench walk (Arrival/Approaches/Life facets/Stage); the questions now follow the live brief’s sections.
 
 ### Script (same for R1–R5)
 
