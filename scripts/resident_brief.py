@@ -181,6 +181,30 @@ def dossier_units(issue: dict, eligible: dict) -> list[str]:
     return raws[:4]
 
 
+def tracking_html(issue: dict) -> str:
+    """Durable-history line: collection facts only.
+
+    Absence is never a resolution; editions_seen is never importance.
+    """
+    tracking = issue.get("tracking") or {}
+    seen = int(tracking.get("editions_seen") or 0)
+    if seen <= 0:
+        return ""
+    if seen == 1:
+        text = "Suivi depuis cette édition."
+    else:
+        first = date_html(tracking.get("first_seen"), fallback="date non précisée")
+        text = f"Suivi depuis le {first} — présent dans {seen} éditions collectées."
+    missed = int(tracking.get("editions_missed") or 0)
+    if missed > 0:
+        label = "édition" if missed == 1 else "éditions"
+        text += (
+            f" Absent de {missed} {label} — une absence de la collecte"
+            " n’est pas une résolution."
+        )
+    return f'<p class="dossier-tracking fine">{text}</p>'
+
+
 def dossier_html(issue: dict, eligible: dict) -> str:
     """One dossier: the question, who spoke, who stayed silent, sources to compare.
 
@@ -245,7 +269,7 @@ def dossier_html(issue: dict, eligible: dict) -> str:
         f'<div class="dossier-head"><span class="dossier-nest">{esc(NEST_LABELS[nest])}</span>'
         f'<span class="dossier-count">{spoke_count} sources · rapprochement proposé</span></div>'
         f'<h3 class="dossier-q">{question}</h3>'
-        f"{spoke_line}{sources}{silence_line}{remix_line}{units_line}"
+        f"{tracking_html(issue)}{spoke_line}{sources}{silence_line}{remix_line}{units_line}"
         f"</article>"
     )
 

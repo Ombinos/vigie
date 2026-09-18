@@ -38,6 +38,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import change_ledger  # noqa: E402
+import dossier_history  # noqa: E402
 import ingest_rss  # noqa: E402
 
 IN_PATH = ROOT / "data" / "normalized" / "latest_enriched.json"
@@ -569,6 +570,16 @@ def main() -> None:
     issues.sort(key=lambda x: (x["evidence"].get("publication_latest") or "", x["source_count"]), reverse=True)
     issues.sort(key=lambda x: 0 if "quebec-city" in x["geo_focus"] else 1)
     ledger = change_ledger.diff_editions(issues, previous, has_previous=previous_loaded)
+    # Durable dossier history: one edition per collection snapshot
+    # (normalized_at), so offline re-runs never inflate the counts.
+    edition_ts = str(payload.get("normalized_at") or now)
+    history_path = OUT_ISSUES.parent / "history.json"
+    history = dossier_history.load_history(history_path)
+    history = dossier_history.update_history(history, issues, edition_ts)
+    for issue in issues:
+        tracking = dossier_history.tracking_of(history, issue["issue_id"])
+        if tracking:
+            issue["tracking"] = tracking
     OUT_ISSUES.parent.mkdir(parents=True, exist_ok=True)
     out = {
         "clustered_at": now,
@@ -592,9 +603,15 @@ def main() -> None:
         "chancellery_enabled": [s.get("id") for s in chancellery],
         "chancellery_institutions": [i["institution_id"] for i in institutions],
         "change_ledger": ledger,
+        "dossier_history": {
+            "method": dossier_history.METHOD,
+            "edition_count": history.get("edition_count"),
+            "tracked_dossiers": len(history.get("dossiers") or {}),
+        },
         "issues": issues,
     }
     OUT_ISSUES.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"issues {len(issues)} (dropped single-voice {dropped_single}) -> {OUT_ISSUES}")
     for i in issues[:8]:
         print("-", i["scar"], "|", i["question"][:90], "| voices", i["source_count"], "| geos", i["geo_focus"])
