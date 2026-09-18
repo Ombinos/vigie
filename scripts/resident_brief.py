@@ -41,12 +41,35 @@ SERVICES = (
 )
 
 
+# Display-spoofing control characters (C0/C1 except tab/LF/CR, soft hyphen,
+# zero-width marks and bidi overrides) are stripped from relayed text. The
+# visible wording stays verbatim; these characters are display instructions,
+# not content, and a hostile feed must not be able to spoof what a title says.
+_SPOOF = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\xad\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+)
+
+TITLE_CAP = 300     # relayed titles are truncated, never padded or rewritten
+SUMMARY_CAP = 2000  # excerpt source and search index; longer summaries add no recall
+
+
+def sanitize(value: object) -> str:
+    return _SPOOF.sub("", str(value if value is not None else ""))
+
+
+def safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def esc(value: object) -> str:
-    return html.escape(str(value if value is not None else ""), quote=True)
+    return html.escape(sanitize(value), quote=True)
 
 
 def plain(value: object) -> str:
-    text = html.unescape(str(value or ""))
+    text = sanitize(html.unescape(str(value or "")))
     return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", text)).strip()
 
 
@@ -111,9 +134,14 @@ def latest_run() -> dict:
 def prepare_items(ranked: list[dict], now: datetime) -> tuple[list[dict], int]:
     """Preserve rank order; age gate by publication, never fetch time."""
     rows, excluded, seen = [], 0, set()
-    for item in ranked:
+    for item in ranked or []:
+        if not isinstance(item, dict):
+            excluded += 1
+            continue
         url = safe_url(item.get("url"))
         title = plain(item.get("title"))
+        if len(title) > TITLE_CAP:
+            title = title[:TITLE_CAP].rstrip() + "…"
         when = parse_date(item.get("published_at"))
         if not title or not url:
             excluded += 1
@@ -124,23 +152,35 @@ def prepare_items(ranked: list[dict], now: datetime) -> tuple[list[dict], int]:
         if url in seen:
             continue
         seen.add(url)
-        enrich = item.get("enrich") or {}
-        geo = (enrich.get("geo") or {}).get("geo", item.get("display_geo", "linked"))
-        topic_ids = [t.get("topic", "other") for t in enrich.get("topics", []) if isinstance(t, dict)] or ["other"]
-        text = folded(title + " " + plain(item.get("summary")))
+        enrich = item.get("enrich")
+        enrich = enrich if isinstance(enrich, dict) else {}
+        geo_block = enrich.get("geo")
+        geo = (geo_block.get("geo") if isinstance(geo_block, dict) else None) or item.get("display_geo", "linked")
+        topics_block = enrich.get("topics")
+        topic_ids = [t.get("topic", "other") for t in (topics_block if isinstance(topics_block, list) else []) if isinstance(t, dict)] or ["other"]
+        summary = plain(item.get("summary"))[:SUMMARY_CAP]
+        text = folded(title + " " + summary)
         areas = [key for key, (_, pattern) in AREAS.items() if geo == "quebec-city" and re.search(pattern, text)]
         # IDs are derived from canonical URLs: syndication/feed changes do not erase bookmarks.
         uid = hashlib.sha256(url.encode()).hexdigest()[:20]
         rows.append({**item, "uid": uid, "url": url, "title": title,
-                     "summary": plain(item.get("summary")), "published": when.isoformat(),
+                     "summary": summary, "published": when.isoformat(),
                      "geo": geo, "topics": topic_ids, "areas": areas})
     return rows, excluded
 
 
 def related_sources(item: dict, issues: list[dict], eligible: dict[str, dict]) -> list[dict]:
     rows, seen = [], {item["url"]}
-    for issue in issues:
-        entries = [it for voice in issue.get("tensions", []) for it in voice.get("items", [])]
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            continue
+        entries = [
+            it
+            for voice in (issue.get("tensions") or [])
+            if isinstance(voice, dict)
+            for it in (voice.get("items") or [])
+            if isinstance(it, dict)
+        ]
         if not any(it.get("candidate_id") == item.get("id") for it in entries):
             continue
         for entry in entries:
@@ -186,8 +226,9 @@ def tracking_html(issue: dict) -> str:
 
     Absence is never a resolution; editions_seen is never importance.
     """
-    tracking = issue.get("tracking") or {}
-    seen = int(tracking.get("editions_seen") or 0)
+    tracking = issue.get("tracking")
+    tracking = tracking if isinstance(tracking, dict) else {}
+    seen = safe_int(tracking.get("editions_seen"))
     if seen <= 0:
         return ""
     if seen == 1:
@@ -195,7 +236,7 @@ def tracking_html(issue: dict) -> str:
     else:
         first = date_html(tracking.get("first_seen"), fallback="date non précisée")
         text = f"Suivi depuis le {first} — présent dans {seen} éditions collectées."
-    missed = int(tracking.get("editions_missed") or 0)
+    missed = safe_int(tracking.get("editions_missed"))
     if missed > 0:
         label = "édition" if missed == 1 else "éditions"
         text += (
@@ -220,7 +261,7 @@ def dossier_html(issue: dict, eligible: dict) -> str:
         name = str(tension.get("institution_name") or "").strip()
         if name and name not in spoke:
             spoke.append(name)
-    spoke_count = int(issue.get("source_count") or len(spoke))
+    spoke_count = safe_int(issue.get("source_count"), len(spoke))
     bits: list[str] = []
     for tension in tensions:
         inst = esc(str(tension.get("institution_name") or "Source").strip())
@@ -276,7 +317,7 @@ def dossier_html(issue: dict, eligible: dict) -> str:
 
 def dossiers_section(issues: list[dict], eligible: dict) -> str:
     """Cross-source dossiers on the resident front door — the lookout, in French."""
-    dossiers = [iss for iss in (issues or []) if iss.get("question")]
+    dossiers = [iss for iss in (issues or []) if isinstance(iss, dict) and iss.get("question")]
     count = len(dossiers)
     if dossiers:
         cards = "".join(dossier_html(iss, eligible) for iss in dossiers[:6])
@@ -303,12 +344,12 @@ def dossiers_section(issues: list[dict], eligible: dict) -> str:
 
 
 def _delta_text(delta: dict | None) -> str:
-    delta = delta or {}
+    delta = delta if isinstance(delta, dict) else {}
     parts: list[str] = []
-    added = int(delta.get("items_added") or 0)
+    added = safe_int(delta.get("items_added"))
     if added:
         parts.append(f"+{added} article" + ("s" if added > 1 else ""))
-    voices = int(delta.get("voices_added") or 0)
+    voices = safe_int(delta.get("voices_added"))
     if voices:
         parts.append(f"+{voices} source" + ("s" if voices > 1 else ""))
     if delta.get("official_voice_joined"):
@@ -444,7 +485,7 @@ def _rw_history_line(event: dict, history: dict) -> str:
     rec = history.get(str(event.get("event_id")))
     if not isinstance(rec, dict):
         return ""
-    seen = int(rec.get("collections_seen") or 0)
+    seen = safe_int(rec.get("collections_seen"))
     if seen <= 0:
         return ""
     if seen == 1:
@@ -452,7 +493,7 @@ def _rw_history_line(event: dict, history: dict) -> str:
     else:
         first = date_html(rec.get("first_seen"), fallback="date non précisée")
         text = f"Dans nos collectes depuis le {first} — {seen} collectes."
-    missed = int(rec.get("collections_missed") or 0)
+    missed = safe_int(rec.get("collections_missed"))
     if missed > 0:
         label = "collecte" if missed == 1 else "collectes"
         text += (
@@ -557,16 +598,19 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
     changes = ""
     if has_previous:
         bits = []
-        if diff.get("new_count"):
-            bits.append(f'+{int(diff["new_count"])} nouvelle' + ("s" if int(diff["new_count"]) > 1 else ""))
-        if diff.get("changed_count"):
-            bits.append(f'~{int(diff["changed_count"])} modifiée' + ("s" if int(diff["changed_count"]) > 1 else ""))
-        if diff.get("removed_count"):
-            bits.append(f'−{int(diff["removed_count"])} retirée' + ("s" if int(diff["removed_count"]) > 1 else ""))
+        new_count = safe_int(diff.get("new_count"))
+        changed_count = safe_int(diff.get("changed_count"))
+        removed_count = safe_int(diff.get("removed_count"))
+        if new_count:
+            bits.append(f"+{new_count} nouvelle" + ("s" if new_count > 1 else ""))
+        if changed_count:
+            bits.append(f"~{changed_count} modifiée" + ("s" if changed_count > 1 else ""))
+        if removed_count:
+            bits.append(f"−{removed_count} retirée" + ("s" if removed_count > 1 else ""))
         if bits:
             removed_note = (
                 ' <span class="fine">« Retirée » signifie absente de cette collecte, '
-                "pas nécessairement terminée.</span>" if diff.get("removed_count") else ""
+                "pas nécessairement terminée.</span>" if removed_count else ""
             )
             changes = f'<p class="rw-changes">Depuis la dernière collecte : {" · ".join(bits)}.{removed_note}</p>'
         declared: dict[str, int] = {}

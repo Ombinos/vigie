@@ -407,8 +407,17 @@ def evidence_metadata(items: list[dict]) -> dict:
 def main() -> None:
     if not IN_PATH.exists():
         raise SystemExit(f"Missing {IN_PATH}. Run enrich first.")
-    payload = json.loads(IN_PATH.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(IN_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Unreadable or corrupt {IN_PATH}: {exc}. Run enrich again.")
+    if not isinstance(payload, dict):
+        raise SystemExit(
+            f"Corrupt {IN_PATH}: expected a JSON object, got {type(payload).__name__}."
+        )
     candidates = payload.get("candidates") or []
+    if not isinstance(candidates, list):
+        raise SystemExit(f"Corrupt {IN_PATH}: candidates is not a list.")
     chancellery = ingest_rss.load_enabled_rss(SOURCES_PATH)
     sources = {str(s["id"]): s for s in chancellery}
     feed_inst = feed_to_institution(chancellery)
@@ -420,6 +429,9 @@ def main() -> None:
     accepted = []
     seen = set()
     for candidate in candidates:
+        if not isinstance(candidate, dict):
+            excluded["malformed_candidate"] += 1
+            continue
         sid = str(candidate.get("source_id") or "")
         if sid not in sources:
             excluded["source_not_enabled"] += 1
@@ -445,9 +457,12 @@ def main() -> None:
     previous_loaded = False
     if OUT_ISSUES.exists():
         try:
-            previous = json.loads(OUT_ISSUES.read_text(encoding="utf-8")).get("issues") or []
-            previous_loaded = True
-        except (OSError, ValueError, TypeError):
+            doc = json.loads(OUT_ISSUES.read_text(encoding="utf-8"))
+            previous_issues = doc.get("issues") if isinstance(doc, dict) else None
+            if isinstance(previous_issues, list):
+                previous = [p for p in previous_issues if isinstance(p, dict)]
+                previous_loaded = True
+        except (OSError, ValueError):
             pass
     used_previous = set()
 

@@ -63,6 +63,26 @@ def _parse_iso(raw: object) -> datetime | None:
     return dt.astimezone(timezone.utc) if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _is_after(new_ts: str, old_ts: str) -> bool:
+    """True when new_ts is strictly after old_ts. _parse_iso normalizes mixed
+    UTC offsets (Z, +00:00, -04:00) into comparable datetimes, so ordering is
+    chronological, not lexicographic; unparseable values fall back to string
+    order."""
+    if not old_ts:
+        return bool(new_ts)
+    new_dt, old_dt = _parse_iso(new_ts), _parse_iso(old_ts)
+    if new_dt is not None and old_dt is not None:
+        return new_dt > old_dt
+    return new_ts > old_ts
+
+
 def _points(geometry: object) -> list[tuple[float, float]]:
     """Flatten Point/LineString/MultiLineString coordinates into (lon, lat) pairs."""
     if not isinstance(geometry, dict):
@@ -249,10 +269,7 @@ def load_event_history(store_path: Path) -> dict:
     events = hist.get("events")
     if not isinstance(events, dict):
         return empty_event_history()
-    try:
-        count = int(hist.get("collection_count") or 0)
-    except (TypeError, ValueError):
-        count = 0
+    count = _safe_int(hist.get("collection_count"))
     return {
         "method": HISTORY_METHOD,
         "updated_at": hist.get("updated_at"),
@@ -274,11 +291,13 @@ def update_event_history(history: dict, active: list[dict], collection_ts: str) 
     if not collection_ts:
         return history
     updated_at = str(history.get("updated_at") or "")
-    if updated_at and collection_ts <= updated_at:
+    if not _is_after(collection_ts, updated_at):
         return history
 
     events: dict[str, dict] = {
-        str(k): dict(v) for k, v in (history.get("events") or {}).items()
+        str(k): dict(v)
+        for k, v in (history.get("events") or {}).items()
+        if isinstance(v, dict)
     }
     present: set[str] = set()
     for event in active or []:
@@ -296,16 +315,16 @@ def update_event_history(history: dict, active: list[dict], collection_ts: str) 
             }
             continue
         rec["last_seen"] = collection_ts
-        rec["collections_seen"] = int(rec.get("collections_seen") or 0) + 1
+        rec["collections_seen"] = _safe_int(rec.get("collections_seen")) + 1
         events[eid] = rec
 
     for eid, rec in events.items():
         if eid not in present:
-            rec["collections_missed"] = int(rec.get("collections_missed") or 0) + 1
+            rec["collections_missed"] = _safe_int(rec.get("collections_missed")) + 1
 
     events = {
         eid: rec for eid, rec in events.items()
-        if int(rec.get("collections_missed") or 0) < HISTORY_MISSED_PRUNE
+        if _safe_int(rec.get("collections_missed")) < HISTORY_MISSED_PRUNE
     }
     if len(events) > HISTORY_EVENT_CAP:
         keep = sorted(
@@ -318,7 +337,7 @@ def update_event_history(history: dict, active: list[dict], collection_ts: str) 
     return {
         "method": HISTORY_METHOD,
         "updated_at": collection_ts,
-        "collection_count": int(history.get("collection_count") or 0) + 1,
+        "collection_count": _safe_int(history.get("collection_count")) + 1,
         "events": events,
     }
 

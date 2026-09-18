@@ -96,14 +96,14 @@ def acquire_lock() -> bool:
     return True
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Collect, verify and deploy one edition.")
     parser.add_argument(
         "--no-deploy",
         action="store_true",
         help="Collect, verify and stage only; do not touch Vercel",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not acquire_lock():
         log("SKIP another refresh is already running (lock held)")
