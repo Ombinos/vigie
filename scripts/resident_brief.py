@@ -439,7 +439,31 @@ def _rw_dates(event: dict) -> str:
     return ""
 
 
-def _rw_card(event: dict, new_ids: set, changed_ids: set, has_previous: bool) -> str:
+def _rw_history_line(event: dict, history: dict) -> str:
+    """Durable per-event collection facts. An absence is never an end of works."""
+    rec = history.get(str(event.get("event_id")))
+    if not isinstance(rec, dict):
+        return ""
+    seen = int(rec.get("collections_seen") or 0)
+    if seen <= 0:
+        return ""
+    if seen == 1:
+        text = "Première collecte où cette entrave apparaît."
+    else:
+        first = date_html(rec.get("first_seen"), fallback="date non précisée")
+        text = f"Dans nos collectes depuis le {first} — {seen} collectes."
+    missed = int(rec.get("collections_missed") or 0)
+    if missed > 0:
+        label = "collecte" if missed == 1 else "collectes"
+        text += (
+            f" Auparavant absente de {missed} {label} — une absence"
+            " n’est pas une fin des travaux."
+        )
+    return f'<p class="rw-history fine">{text}</p>'
+
+
+def _rw_card(event: dict, new_ids: set, changed_ids: set, has_previous: bool,
+             history: dict | None = None) -> str:
     eid = str(event.get("event_id"))
     impact = str(event.get("vehicle_impact") or "")
     severity = RW_SEVERITY.get(impact, 6)
@@ -465,7 +489,7 @@ def _rw_card(event: dict, new_ids: set, changed_ids: set, has_previous: bool) ->
     return (
         f'<li class="rw-item rw-sev-{severity}">'
         f'<div class="rw-head">{tags}<span class="rw-roads">{esc(_rw_places(event) or "Lieu non précisé")}</span></div>'
-        f"{kicker_html}{_rw_dates(event)}{desc_html}</li>"
+        f"{kicker_html}{_rw_dates(event)}{_rw_history_line(event, history or {})}{desc_html}</li>"
     )
 
 
@@ -492,7 +516,19 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
     ordered.sort(key=lambda e: RW_SEVERITY.get(str(e.get("vehicle_impact") or ""), 6))
     new_ids = {e.get("event_id") for e in (diff.get("new") or []) if isinstance(e, dict)}
     changed_ids = {e.get("event_id") for e in (diff.get("changed") or []) if isinstance(e, dict)}
-    cards = "".join(_rw_card(e, new_ids, changed_ids, has_previous) for e in ordered[:RW_DISPLAY_CAP])
+    hist_doc = rw.get("event_history") if isinstance(rw.get("event_history"), dict) else {}
+    # Method guard mirrors ingest_wzdx.HISTORY_METHOD: a foreign-history store
+    # renders no collection facts rather than misreading another model's record.
+    history = (
+        hist_doc.get("events")
+        if hist_doc.get("method") == "wzdx-event-history-v1"
+        and isinstance(hist_doc.get("events"), dict)
+        else {}
+    )
+    cards = "".join(
+        _rw_card(e, new_ids, changed_ids, has_previous, history)
+        for e in ordered[:RW_DISPLAY_CAP]
+    )
     count = len(ordered)
     count_note = f"{count} entrave déclarée<br>du flux officiel." if count == 1 else f"{count} entraves déclarées<br>du flux officiel."
     if ordered:

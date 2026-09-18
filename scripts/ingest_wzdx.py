@@ -5,7 +5,12 @@ cluster/rank entirely. Raw GeoJSON snapshots are append-only (fetch is the scar)
 The store keeps parsed events inside the metro bbox plus an honest collection
 diff — removal from a collection is never reported as ended or resolved, and
 estimated dates stay marked estimated. A feed outage never kills the news
-pipeline: on failure the previous store is kept and this exits 0.
+pipeline: on failure the previous store is kept and this exits 0. The store
+also accumulates a durable per-event history (`event_history`: first seen,
+collections seen/missed — presence facts only, never a timeline of the works
+themselves) under the same forward-only, method-guarded discipline: one
+collection is one distinct fetched_at snapshot, so offline reuse never
+inflates counts, and an absence is never an end.
 
 Event identity is the GeoJSON feature-level `id` (e.g. "ACL-20260917-EC-001"),
 verified stable across collections. The WZDX `data_source_id` property is
@@ -39,6 +44,9 @@ COMPARE_FIELDS = (
 )
 ENDED_STATUSES = ("completed", "cancelled", "archived")
 SKIP_REASONS = ("malformed", "missing_identifier", "missing_geometry", "outside_bbox", "duplicate_identifier")
+HISTORY_METHOD = "wzdx-event-history-v1"
+HISTORY_MISSED_PRUNE = 120  # collections missed before a dormant event is dropped (~30 days at 6 h)
+HISTORY_EVENT_CAP = 4000    # max events tracked; pruned by oldest last_seen
 
 
 def _parse_iso(raw: object) -> datetime | None:
@@ -200,7 +208,101 @@ def load_previous(store_path: Path, method: str = METHOD) -> list[dict] | None:
     return events if isinstance(events, list) else None
 
 
-def build_store(src: dict, active: list[dict], counts: dict, diff: dict, fetched_at: datetime) -> dict:
+def empty_event_history() -> dict:
+    return {"method": HISTORY_METHOD, "updated_at": None, "collection_count": 0, "events": {}}
+
+
+def load_event_history(store_path: Path) -> dict:
+    """Previous store's event history. Missing, corrupt or foreign-method
+    history starts fresh — never mixed (same scar discipline as the store)."""
+    try:
+        doc = json.loads(store_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty_event_history()
+    if not isinstance(doc, dict) or doc.get("method") != METHOD:
+        return empty_event_history()
+    hist = doc.get("event_history")
+    if not isinstance(hist, dict) or hist.get("method") != HISTORY_METHOD:
+        return empty_event_history()
+    events = hist.get("events")
+    if not isinstance(events, dict):
+        return empty_event_history()
+    try:
+        count = int(hist.get("collection_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return {
+        "method": HISTORY_METHOD,
+        "updated_at": hist.get("updated_at"),
+        "collection_count": count,
+        "events": {str(k): v for k, v in events.items() if isinstance(v, dict)},
+    }
+
+
+def update_event_history(history: dict, active: list[dict], collection_ts: str) -> dict:
+    """Pure: history advanced by one collection; the input is not mutated.
+
+    One collection is one distinct fetched_at snapshot, so offline reuse never
+    inflates counts and history only moves forward: a timestamp at or before
+    the last update returns history unchanged. An event absent from this
+    collection gains collections_missed — an absence from the feed, never a
+    claim that the works ended (removed ≠ ended).
+    """
+    collection_ts = str(collection_ts or "").strip()
+    if not collection_ts:
+        return history
+    updated_at = str(history.get("updated_at") or "")
+    if updated_at and collection_ts <= updated_at:
+        return history
+
+    events: dict[str, dict] = {
+        str(k): dict(v) for k, v in (history.get("events") or {}).items()
+    }
+    present: set[str] = set()
+    for event in active or []:
+        eid = str((event or {}).get("event_id") or "").strip()
+        if not eid:
+            continue
+        present.add(eid)
+        rec = events.get(eid)
+        if rec is None:
+            events[eid] = {
+                "first_seen": collection_ts,
+                "last_seen": collection_ts,
+                "collections_seen": 1,
+                "collections_missed": 0,
+            }
+            continue
+        rec["last_seen"] = collection_ts
+        rec["collections_seen"] = int(rec.get("collections_seen") or 0) + 1
+        events[eid] = rec
+
+    for eid, rec in events.items():
+        if eid not in present:
+            rec["collections_missed"] = int(rec.get("collections_missed") or 0) + 1
+
+    events = {
+        eid: rec for eid, rec in events.items()
+        if int(rec.get("collections_missed") or 0) < HISTORY_MISSED_PRUNE
+    }
+    if len(events) > HISTORY_EVENT_CAP:
+        keep = sorted(
+            events,
+            key=lambda eid: (str(events[eid].get("last_seen") or ""), eid),
+            reverse=True,
+        )[:HISTORY_EVENT_CAP]
+        events = {eid: events[eid] for eid in keep}
+
+    return {
+        "method": HISTORY_METHOD,
+        "updated_at": collection_ts,
+        "collection_count": int(history.get("collection_count") or 0) + 1,
+        "events": events,
+    }
+
+
+def build_store(src: dict, active: list[dict], counts: dict, diff: dict, fetched_at: datetime,
+                history: dict | None = None) -> dict:
     return {
         "method": METHOD,
         "status": "proposed",
@@ -215,6 +317,7 @@ def build_store(src: dict, active: list[dict], counts: dict, diff: dict, fetched
         "counts": {**counts, "active": len(active)},
         "events": active,
         "diff": diff,
+        "event_history": history if isinstance(history, dict) else empty_event_history(),
     }
 
 
@@ -324,7 +427,10 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
     store_fetched_at = min(fetched_ats)
     active = sorted((e for e in all_events if e.get("active")), key=lambda e: str(e["event_id"]))
     diff = diff_events(active, previous, now=store_fetched_at)
-    store = build_store(sources[0], active, counts, diff, store_fetched_at)
+    history = update_event_history(
+        load_event_history(store_path), active, store_fetched_at.isoformat()
+    )
+    store = build_store(sources[0], active, counts, diff, store_fetched_at, history)
     store_path.parent.mkdir(parents=True, exist_ok=True)
     store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True, "store": store, "store_path": store_path}
@@ -349,6 +455,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  diff: +{d['new_count']} new, -{d['removed_count']} removed, ~{d['changed_count']} changed")
         else:
             print("  diff: no previous collection to compare")
+        h = store.get("event_history") or {}
+        print(f"  event history: {h.get('collection_count')} collection(s), "
+              f"{len(h.get('events') or {})} event(s) tracked")
         try:
             print(f"store: {result['store_path'].relative_to(ROOT)}")
         except ValueError:
