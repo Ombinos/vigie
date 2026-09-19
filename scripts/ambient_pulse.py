@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rank_display
+import store_io
 
 ROOT = Path(__file__).resolve().parents[1]
 ISSUES = rank_display.ISSUES
@@ -412,12 +413,10 @@ def render_morning_html(digest: dict) -> str:
 
 
 def write_digest(digest: dict) -> dict[str, Path]:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
-    OUT_JSON.write_text(json.dumps(digest, ensure_ascii=False, indent=2), encoding="utf-8")
-    OUT_TXT.write_text(render_morning_txt(digest), encoding="utf-8")
-    OUT_WIDGET.write_text(render_morning_widget(digest), encoding="utf-8")
-    OUT_HTML.write_text(render_morning_html(digest), encoding="utf-8")
+    store_io.write_json_atomic(OUT_JSON, digest)
+    store_io.write_text_atomic(OUT_TXT, render_morning_txt(digest))
+    store_io.write_text_atomic(OUT_WIDGET, render_morning_widget(digest))
+    store_io.write_text_atomic(OUT_HTML, render_morning_html(digest))
     return {
         "json": OUT_JSON,
         "txt": OUT_TXT,

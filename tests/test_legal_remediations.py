@@ -121,11 +121,18 @@ class SearchIndexHonesty(unittest.TestCase):
         html = brief.article_html(rows[0], 1, [])
         search = html.split('data-search="', 1)[1].split('"', 1)[0]
         # data-search is folded (lowercase, accents stripped) like the rest of
-        # the search index.
-        self.assertIn(brief.folded("Travaux dans le quartier Saint-Roch"), search)
-        self.assertNotIn(brief.folded(tail), search)
+        # the search index; assert the literal, not a re-fold of the input.
+        self.assertIn("travaux dans le quartier saint-roch a quebec", search)
+        self.assertNotIn("sentinelbeyondtheexcerpt", search)
         self.assertNotIn(tail, html.split("<p class=\"excerpt\">", 1)[1].split("</p>", 1)[0])
         self.assertLessEqual(len(search), 400)
+
+    def test_ligatures_and_curly_apostrophes_fold_like_the_client(self) -> None:
+        self.assertEqual(brief.folded("L’œuvre théâtrale"), "l'oeuvre theatrale")
+        rows, _ = brief.prepare_items([story(summary="Une œuvre attendue")], NOW)
+        html = brief.article_html(rows[0], 1, [])
+        search = html.split('data-search="', 1)[1].split('"', 1)[0]
+        self.assertIn("oeuvre", search)
 
 
 class IdentityLaw(unittest.TestCase):
@@ -201,6 +208,24 @@ class IdentityLaw(unittest.TestCase):
             self.assertEqual(req.get_header("User-agent"), ingest_rss.USER_AGENT)
         # a refusal is final: it is not retried under the same identity either
         self.assertEqual(len(self.requests_of(opener)), 1)
+
+    def test_conditional_refusal_still_tries_one_plain_request(self) -> None:
+        # 412 (or a proxy that dislikes validators) is the validator's fault,
+        # not the origin refusing the article: fall through to the plain GET.
+        opener = mock.Mock()
+        opener.open.side_effect = [
+            urllib.error.HTTPError(URL, 412, "Precondition Failed", {}, None),
+            response(RSS, {}),
+        ]
+        cache = {URL: {"etag": "e1", "last_modified": None,
+                       "content_type": "application/rss+xml", "updated_at": "x"}}
+        with mock.patch.object(ingest_rss, "_load_http_cache", return_value=cache):
+            body, _ = self.fetch(opener)
+        self.assertEqual(body, RSS)
+        reqs = self.requests_of(opener)
+        self.assertEqual(len(reqs), 2)
+        self.assertEqual(reqs[0].get_header("If-none-match"), "e1")
+        self.assertIsNone(reqs[1].get_header("If-none-match"))
 
     def test_guard_rejection_never_identity_switches(self) -> None:
         opener = mock.Mock()
@@ -303,6 +328,7 @@ class PublicLegalPage(unittest.TestCase):
     def test_legal_page_discloses_both_identities_and_retention(self) -> None:
         text = (brief.ROOT / "legal.md").read_text(encoding="utf-8")
         self.assertIn(ingest_rss.USER_AGENT, text)
+        self.assertIn(ingest_rss.FALLBACK_USER_AGENT, text)
         self.assertIn("30", text)
 
 

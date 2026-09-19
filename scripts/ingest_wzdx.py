@@ -83,6 +83,13 @@ def _is_after(new_ts: str, old_ts: str) -> bool:
     return new_ts > old_ts
 
 
+def _chrono_key(value: object) -> tuple[int, object]:
+    """Sort key matching _is_after: mixed-offset stamps compare chronologically,
+    unparseable ones sort below parsed ones and by string."""
+    dt = _parse_iso(value)
+    return (1, dt) if dt is not None else (0, str(value or ""))
+
+
 def _points(geometry: object) -> list[tuple[float, float]]:
     """Flatten Point/LineString/MultiLineString coordinates into (lon, lat) pairs."""
     if not isinstance(geometry, dict):
@@ -314,24 +321,30 @@ def update_event_history(history: dict, present_events: list[dict], collection_t
                 "last_seen": collection_ts,
                 "collections_seen": 1,
                 "collections_missed": 0,
+                "absent_streak": 0,
             }
             continue
         rec["last_seen"] = collection_ts
         rec["collections_seen"] = _safe_int(rec.get("collections_seen")) + 1
+        rec["absent_streak"] = 0  # present in the feed: the dormancy clock restarts
         events[eid] = rec
 
     for eid, rec in events.items():
         if eid not in present:
+            # collections_missed stays the lifetime display fact; absent_streak
+            # is the consecutive-absence clock this prune uses (mirrors
+            # dossier_history): a flickering event is never dropped mid-feed.
             rec["collections_missed"] = _safe_int(rec.get("collections_missed")) + 1
+            rec["absent_streak"] = _safe_int(rec.get("absent_streak")) + 1
 
     events = {
         eid: rec for eid, rec in events.items()
-        if _safe_int(rec.get("collections_missed")) < HISTORY_MISSED_PRUNE
+        if _safe_int(rec.get("absent_streak", rec.get("collections_missed"))) < HISTORY_MISSED_PRUNE
     }
     if len(events) > HISTORY_EVENT_CAP:
         keep = sorted(
             events,
-            key=lambda eid: (str(events[eid].get("last_seen") or ""), eid),
+            key=lambda eid: (_chrono_key(events[eid].get("last_seen")), eid),
             reverse=True,
         )[:HISTORY_EVENT_CAP]
         events = {eid: events[eid] for eid in keep}
@@ -437,9 +450,11 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
             fetched_at = now
             digest = sha256_hex(raw)
             snapshot = dest_dir / f"{stamp}_{digest[:12]}.geojson"
+            archived = True
             try:
                 snapshot.write_bytes(raw)
             except OSError as exc:
+                archived = False
                 print(f"  WARN {source_id}: snapshot not archived ({exc}); continuing from memory")
         parse_error = None
         features: list = []
@@ -453,7 +468,7 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
             # then raises RecursionError, which is not a ValueError. Either way
             # the feed is diagnosed, never fatal.
             parse_error = f"{type(exc).__name__}: {exc}"
-        if not offline:
+        if not offline and archived:
             meta = {
                 "ok": parse_error is None, "source_id": source_id, "source_name": src.get("name"),
                 "institution": src.get("institution") or source_id, "type": "wzdx",

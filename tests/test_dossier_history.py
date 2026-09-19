@@ -97,6 +97,28 @@ class UpdateHistory(unittest.TestCase):
         self.assertIn("a", h["dossiers"])
         self.assertEqual(h["dossiers"]["a"]["editions_seen"], 2)
 
+    def test_absent_streak_resets_on_presence_but_lifetime_misses_stay(self) -> None:
+        h = dossier_history.update_history(dossier_history.empty_history(), [issue("a")], TS1)
+        h = dossier_history.update_history(h, [], TS2)
+        self.assertEqual(h["dossiers"]["a"]["absent_streak"], 1)
+        h = dossier_history.update_history(h, [issue("a")], TS3)
+        self.assertEqual(h["dossiers"]["a"]["absent_streak"], 0)
+        self.assertEqual(h["dossiers"]["a"]["editions_missed"], 1)
+
+    def test_a_dormant_dossier_is_pruned_after_consecutive_absences(self) -> None:
+        history = {
+            "method": dossier_history.METHOD,
+            "updated_at": TS1,
+            "edition_count": 5,
+            "dossiers": {
+                "a": {"first_seen": TS1, "last_seen": TS1, "editions_seen": 1,
+                      "editions_missed": dossier_history.MISSED_PRUNE,
+                      "absent_streak": dossier_history.MISSED_PRUNE, "timeline": []},
+            },
+        }
+        h = dossier_history.update_history(history, [], TS2)
+        self.assertNotIn("a", h["dossiers"])
+
     def test_older_snapshot_ignored(self) -> None:
         h = dossier_history.update_history(dossier_history.empty_history(), [issue("a")], TS2)
         h2 = dossier_history.update_history(h, [issue("a"), issue("b")], TS1)

@@ -105,9 +105,22 @@ def read_refresh_log(path: Path = REFRESH_LOG, tail: int = LOG_TAIL_LINES,
     those after the most recent successful production deploy.
     """
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
+        # Rotation-aware: refresh.py moves the full log to refresh.log.1 and
+        # starts a new one, so reading only the current file would hide every
+        # in-window FAIL right after a rotation.
+        source = Path(path)
+        rotated = source.with_suffix(".log.1")
+        chunks = []
+        for candidate in (rotated, source):
+            try:
+                chunks.append(candidate.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+        if not chunks:
+            raise OSError("no refresh log")
+        lines = "".join(chunks).splitlines()[-tail:]
     except OSError:
-        return {"available": False, "fails": 0, "fails_since_ok": 0,
+        return {"available": False, "has_entries": False, "fails": 0, "fails_since_ok": 0,
                 "last_deploy": None, "last_activity": None, "window_lines": 0}
 
     def parse_line(line: str) -> tuple[str, str] | None:
@@ -132,9 +145,9 @@ def read_refresh_log(path: Path = REFRESH_LOG, tail: int = LOG_TAIL_LINES,
             fails += 1
             if i > last_ok_index:
                 fails_since_ok += 1
-    return {"available": True, "fails": fails, "fails_since_ok": fails_since_ok,
-            "last_deploy": last_deploy, "last_activity": last_activity,
-            "window_lines": len(entries)}
+    return {"available": True, "has_entries": bool(entries), "fails": fails,
+            "fails_since_ok": fails_since_ok, "last_deploy": last_deploy,
+            "last_activity": last_activity, "window_lines": len(entries)}
 
 
 def compile_watchdog(ops_dir: Path | None = None, data_dir: Path | None = None,
@@ -162,19 +175,26 @@ def compile_watchdog(ops_dir: Path | None = None, data_dir: Path | None = None,
     reference = max(stamps) if stamps else None
     week = f"{reference.isocalendar()[0]}-W{reference.isocalendar()[1]:02d}" if reference else "unknown"
 
-    # Health is a claim about facts. With no readable ledger at all the only
-    # honest verdict is blindness: never "the machine is healthy".
+    # Health is a claim about facts. A channel with no readable facts is
+    # reported as blind; the verdict is never "healthy" while one is missing.
     has_feed_facts = bool(feed.get("sources") if isinstance(feed.get("sources"), dict) else False)
     has_media_facts = bool(media.get("latest")) if isinstance(media.get("latest"), dict) else False
     has_metrics_facts = isinstance(metrics.get("latest"), dict) and bool(metrics.get("latest"))
-    has_log_facts = bool(log.get("available") and log.get("last_activity"))
-    facts_present = has_feed_facts or has_media_facts or has_metrics_facts or has_log_facts
+    has_log_facts = bool(log.get("available") and log.get("has_entries"))
+    blind_channels = [name for name, present in (
+        ("feed ledger", has_feed_facts), ("media ledger", has_media_facts),
+        ("edition metrics", has_metrics_facts), ("refresh log", has_log_facts)) if not present]
+    facts_present = bool(has_feed_facts or has_media_facts or has_metrics_facts or has_log_facts)
 
     # --- attention rules (fixed thresholds over ledger facts) ---
     attention: list[str] = []
     watch: list[str] = []
     if not facts_present:
         attention.append("no ledger facts available: the machine room is blind, not healthy")
+    elif blind_channels:
+        # Some facts exist, but at least one channel cannot be seen. That is not
+        # health: the deploy-failure channel in particular must never be silent.
+        watch.append("blind channels (no facts): " + ", ".join(blind_channels))
     feed_sources = feed.get("sources") if isinstance(feed.get("sources"), dict) else {}
     for name, src in sorted(feed_sources.items()):
         if isinstance(src, dict) and src.get("status") in ("failing", "dead"):
@@ -208,6 +228,7 @@ def compile_watchdog(ops_dir: Path | None = None, data_dir: Path | None = None,
         "week": week,
         "reference": reference.isoformat() if reference else None,
         "facts": facts_present,
+        "blind_channels": blind_channels,
         "attention": attention,
         "watch": watch,
         "feed": {
@@ -270,6 +291,9 @@ def _render_markdown(snap: dict, feed_sources: dict, media_latest: dict, weeks: 
     ]
     if snap["attention"]:
         lines += [f"- {line}" for line in snap["attention"]]
+    elif snap.get("blind_channels"):
+        lines.append("Nothing needs a human, but some channels are blind: "
+                     + ", ".join(snap["blind_channels"]) + ". Health is not claimed.")
     elif snap.get("facts"):
         lines.append("Nothing. The machine is healthy.")
     else:
@@ -327,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     if snap["attention"]:
         for line in snap["attention"]:
             print(f"  ! {line}")
+    elif snap.get("blind_channels"):
+        print("  attention: nothing, but blind channels: " + ", ".join(snap["blind_channels"]))
     elif snap.get("facts"):
         print("  attention: nothing - the machine is healthy")
     else:

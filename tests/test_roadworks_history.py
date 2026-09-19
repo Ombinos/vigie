@@ -56,6 +56,23 @@ class UpdateEventHistory(unittest.TestCase):
         self.assertEqual(rec["collections_seen"], 2)
         self.assertEqual(h["collection_count"], 2)
 
+    def test_a_flickering_event_is_not_pruned_for_lifetime_misses(self) -> None:
+        h = ingest_wzdx.update_event_history(ingest_wzdx.empty_event_history(), [ev("a")], TS1)
+        h = ingest_wzdx.update_event_history(h, [], TS2)
+        self.assertEqual(h["events"]["a"]["absent_streak"], 1)
+        h = ingest_wzdx.update_event_history(h, [ev("a")], TS3)
+        self.assertEqual(h["events"]["a"]["absent_streak"], 0)
+        # lifetime misses stay a display fact; the prune uses the streak only
+        h["events"]["a"]["collections_missed"] = ingest_wzdx.HISTORY_MISSED_PRUNE + 5
+        h2 = ingest_wzdx.update_event_history(h, [ev("a")], TS3)
+        self.assertIn("a", h2["events"])
+
+    def test_a_dormant_event_is_pruned_after_consecutive_absences(self) -> None:
+        h = ingest_wzdx.update_event_history(ingest_wzdx.empty_event_history(), [ev("a")], TS1)
+        h["events"]["a"]["absent_streak"] = ingest_wzdx.HISTORY_MISSED_PRUNE
+        h2 = ingest_wzdx.update_event_history(h, [], TS2)
+        self.assertNotIn("a", h2["events"])
+
     def test_absence_counts_missed_never_ended(self) -> None:
         h = ingest_wzdx.update_event_history(
             ingest_wzdx.empty_event_history(), [ev("a"), ev("b")], TS1

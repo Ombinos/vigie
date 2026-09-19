@@ -435,6 +435,30 @@ class RefreshLockStress(unittest.TestCase):
         self.assertTrue(refresh.acquire_lock())
         self.assertEqual(refresh.LOCK_PATH.read_text(encoding="utf-8"), str(os.getpid()))
 
+    def test_a_fresh_takeover_claim_blocks_a_second_taker(self) -> None:
+        refresh.LOCK_PATH.write_text("999", encoding="utf-8")
+        old = time.time() - refresh.LOCK_STALE_SECONDS - 60
+        os.utime(refresh.LOCK_PATH, (old, old))
+        claim = refresh.LOCK_PATH.with_name(refresh.LOCK_PATH.name + ".takeover")
+        claim.write_text("other", encoding="utf-8")
+        try:
+            self.assertFalse(refresh.acquire_lock())
+            # the blocked taker must not disturb the lock it did not win
+            self.assertEqual(refresh.LOCK_PATH.read_text(encoding="utf-8"), "999")
+        finally:
+            claim.unlink()
+
+    def test_a_stale_takeover_claim_is_reclaimed(self) -> None:
+        refresh.LOCK_PATH.write_text("999", encoding="utf-8")
+        old = time.time() - refresh.LOCK_STALE_SECONDS - 60
+        os.utime(refresh.LOCK_PATH, (old, old))
+        claim = refresh.LOCK_PATH.with_name(refresh.LOCK_PATH.name + ".takeover")
+        claim.write_text("dead", encoding="utf-8")
+        os.utime(claim, (old, old))
+        self.assertTrue(refresh.acquire_lock())
+        self.assertEqual(refresh.LOCK_PATH.read_text(encoding="utf-8"), str(os.getpid()))
+        self.assertFalse(claim.exists())
+
     def test_main_skips_cleanly_while_locked(self) -> None:
         refresh.LOCK_PATH.write_text("123", encoding="utf-8")
         self.assertEqual(refresh.main(["--no-deploy"]), 0)
@@ -484,12 +508,33 @@ class SecurityHeadersConfig(unittest.TestCase):
             self.assertIn("base-uri 'none'", csp)
 
     def test_experimental_pages_keep_inline_and_fonts_working(self) -> None:
-        for source in ("/explorer.html", "/morning.html"):
-            csp = self.rules[source]["content-security-policy"]
-            self.assertIn("'unsafe-inline'", csp)
+        explorer = self.rules["/explorer.html"]["content-security-policy"]
+        self.assertIn("script-src 'self' 'unsafe-inline'", explorer)
+        self.assertIn("style-src 'self' 'unsafe-inline'", explorer)
+        morning = self.rules["/morning.html"]["content-security-policy"]
+        # morning.html carries only a non-executing JSON data block: it has no
+        # reason to allow inline script.
+        self.assertIn("script-src 'self';", morning)
+        self.assertNotIn("script-src 'self' 'unsafe-inline'", morning)
+        for csp in (explorer, morning):
             self.assertIn("https://fonts.googleapis.com", csp)
             self.assertIn("https://fonts.gstatic.com", csp)
             self.assertIn("frame-ancestors 'none'", csp)
+
+    def test_method_and_media_paths_carry_a_csp(self) -> None:
+        for source in ("/(.*).md", "/sources.yaml", "/media/(.*)"):
+            self.assertIn("default-src 'none'",
+                          self.rules[source]["content-security-policy"])
+
+    def test_root_and_staged_configs_agree(self) -> None:
+        # The git-build root config and the CLI-uploaded staged copy must not
+        # drift: whichever deploy path ran last decides production headers.
+        root = json.loads((harness.ROOT / "vercel.json").read_text(encoding="utf-8"))
+        root_rules = {
+            rule["source"]: {h["key"].lower(): h["value"] for h in rule["headers"]}
+            for rule in root["headers"]
+        }
+        self.assertEqual(root_rules, self.rules)
 
     def test_vercel_json_is_stageable(self) -> None:
         self.assertIn(".json", stage_public.ASSET_EXTENSIONS)

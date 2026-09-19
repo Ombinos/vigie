@@ -197,6 +197,22 @@ class Watchdog(unittest.TestCase):
         self.assertIn("| a | healthy |", text)
         self.assertIn("last production deploy: 2026-09-19T06:44:00+00:00", text)
 
+    def test_rotated_log_still_counts_failures(self) -> None:
+        self.healthy_ledgers()
+        write(self.ops / "refresh.log.1",
+              "2026-09-19T06:00:00+00:00 START pipeline\n"
+              "2026-09-19T06:01:00+00:00 FAIL pipeline failed (code 1)\n")
+        write(self.ops / "refresh.log",
+              "2026-09-19T06:44:00+00:00 OK production updated\n")
+        doc = self.compile()
+        self.assertGreaterEqual(doc["latest"]["refresh"]["fails"], 1)
+
+    def test_a_missing_log_channel_is_never_health(self) -> None:
+        self.healthy_ledgers()  # ledgers present, no refresh.log at all
+        doc = self.compile()
+        self.assertIn("refresh log", doc["latest"]["blind_channels"])
+        self.assertNotIn("the machine is healthy", self.md.read_text(encoding="utf-8"))
+
     def test_failing_and_dead_sources_raise_attention(self) -> None:
         self.healthy_ledgers()
         feed = json.loads((self.ops / "feed_health.json").read_text(encoding="utf-8"))

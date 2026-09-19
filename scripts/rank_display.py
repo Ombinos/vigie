@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+import store_io
+
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATES = ROOT / "data" / "normalized" / "latest_candidates.json"
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
@@ -2498,8 +2500,7 @@ def main() -> None:
         "candidate_count": len(ranked),
         "candidates": ranked,
     }
-    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    OUT_JSON.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    store_io.write_json_atomic(OUT_JSON, out)
 
     issues: list[dict] = []
     ledger: dict = {}
@@ -2555,13 +2556,14 @@ def main() -> None:
     # residents learn its vocabulary before reading their local news.
     import resident_brief
 
-    (OUT_HTML.parent / "explorer.html").write_text(
-        render_html(ranked, now.isoformat(), issues, clock), encoding="utf-8"
+    store_io.write_text_atomic(
+        OUT_HTML.parent / "explorer.html",
+        render_html(ranked, now.isoformat(), issues, clock),
     )
-    OUT_HTML.write_text(
+    store_io.write_text_atomic(
+        OUT_HTML,
         resident_brief.render_brief(ranked, now.isoformat(), issues, ledger=ledger,
                                     roadworks=roadworks, anomalies=anomalies, edges=edges),
-        encoding="utf-8",
     )
     near = sum(1 for c in ranked if section_for(c) == "near")
     prov = sum(1 for c in ranked if section_for(c) == "province")

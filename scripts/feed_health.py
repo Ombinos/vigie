@@ -164,11 +164,18 @@ def compile_health(raw_dir: Path | None = None, out_path: Path | None = None) ->
 
     sources: dict[str, dict] = {}
     attention: list[str] = []
+    if timelines and reference is None:
+        # Every observed stamp is beyond the ceiling: the collection clock is
+        # suspect, so no age can be computed and health is unknown.
+        attention.append("all collection stamps are in the future: clock anomaly, "
+                         "source ages are unknown")
     for name, timeline in sorted(timelines.items()):
         oks = [t for t in timeline if t["ok"]]
         last_ok_at = oks[-1]["at"] if oks else None
         hours_since_ok = (
-            round((reference - last_ok_at).total_seconds() / 3600, 1)
+            # A source whose only success is future-stamped is not "younger than
+            # the reference"; clamp so the ledger never publishes negative ages.
+            round(max(0.0, (reference - last_ok_at).total_seconds() / 3600), 1)
             if reference and last_ok_at else None
         )
         failures = _streak(timeline, lambda t: not t["ok"])
@@ -180,7 +187,18 @@ def compile_health(raw_dir: Path | None = None, out_path: Path | None = None) ->
         last_error = next((t["error"] or t["parse_error"] for t in reversed(timeline)
                            if not t["ok"] and (t["error"] or t["parse_error"])), None)
 
-        if last_ok_at is None or (hours_since_ok is not None and hours_since_ok >= DEAD_AFTER_HOURS):
+        if last_ok_at is None:
+            # Never succeeded: "dead" means no success for three days, so a
+            # newly added feed that failed once is not dead yet.
+            first_at = timeline[0]["at"]
+            dry_hours = ((reference - first_at).total_seconds() / 3600) if reference else 0.0
+            if dry_hours >= DEAD_AFTER_HOURS:
+                status = "dead"
+            elif failures >= FAILING_STREAK:
+                status = "failing"
+            else:
+                status = "degraded"
+        elif hours_since_ok is not None and hours_since_ok >= DEAD_AFTER_HOURS:
             status = "dead"
         elif failures >= FAILING_STREAK:
             status = "failing"

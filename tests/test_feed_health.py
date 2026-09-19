@@ -91,14 +91,31 @@ class CompileHealth(unittest.TestCase):
         self.assertEqual(doc["sources"]["active"]["status"], "healthy")
         self.assertTrue(any("quiet" in line for line in doc["attention"]))
 
-    def test_never_ok_is_dead_with_last_error(self) -> None:
+    def test_never_ok_is_degraded_until_the_dry_spell_is_old(self) -> None:
         write_meta(self.raw, "born-bad", "20260919T000000Z", ok=False, error="HTTP 404", digest="000000000000")
+        write_meta(self.raw, "healthy", "20260919T000000Z", ok=True, digest="000000000001")
+        doc = self.compile()
+        src = doc["sources"]["born-bad"]
+        # "dead" means no success for three days; one recent failure is not that.
+        self.assertEqual(src["status"], "degraded")
+        self.assertIsNone(src["last_ok_at"])
+        self.assertEqual(src["last_error"], "HTTP 404")
+        self.assertIn("born-bad: degraded", doc["attention"][0])
+
+    def test_never_ok_spanning_three_days_is_dead(self) -> None:
+        write_meta(self.raw, "born-bad", "20260915T000000Z", ok=False, error="HTTP 404", digest="000000000000")
+        write_meta(self.raw, "born-bad", "20260919T000000Z", ok=False, error="HTTP 404", digest="000000000001")
+        write_meta(self.raw, "healthy", "20260919T000000Z", ok=True, digest="000000000002")
         doc = self.compile()
         src = doc["sources"]["born-bad"]
         self.assertEqual(src["status"], "dead")
-        self.assertIsNone(src["last_ok_at"])
-        self.assertEqual(src["last_error"], "HTTP 404")
         self.assertIn("born-bad: dead", doc["attention"][0])
+
+    def test_all_future_stamps_report_a_clock_anomaly(self) -> None:
+        write_meta(self.raw, "src", "20300101T000000Z", ok=False, error="HTTP 500", digest="000000000000")
+        doc = self.compile()
+        self.assertTrue(any("future" in line for line in doc["attention"]))
+        self.assertIsNone(doc["sources"]["src"]["hours_since_ok"])
 
     def test_falling_yield_is_degraded(self) -> None:
         stamps = [f"2026091{i}T000000Z" for i in range(8)]

@@ -56,7 +56,15 @@ Vigie/0.2 (+https://vigieqc.com/legal.md; news aggregator; non-commercial)
 
 Certains serveurs ralentissent ou interrompent les lecteurs automatisés au
 niveau du transport (sans refus HTTP) ; pour ceux-là uniquement, et c'est
-documenté ici, Vigie utilise une identité de navigateur standard. **Un refus
+documenté ici, Vigie utilise une identité de navigateur standard :
+
+```
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Vigie/0.2
+```
+
+Le changement d'identité n'a lieu qu'après un échec de transport réel (délai,
+connexion réinitialisée), jamais après un refus HTTP, et il expire après
+30 jours : l'identité honnête est alors réessayée. **Un refus
 HTTP (403, 410, 429…) est toujours respecté** : il n'est jamais contourné, ni
 par une autre identité, ni par un autre chemin. Aucun mur de paiement n'est
 jamais touché. La collecte est conditionnelle (ETag / If-Modified-Since) pour

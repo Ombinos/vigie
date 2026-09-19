@@ -80,44 +80,69 @@ def run_step(name: str, command: list[str], timeout: int, cwd: Path = ROOT) -> N
         log(f"  | {line}")
 
 
-def acquire_lock() -> bool:
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    token = str(os.getpid())
+def _create_lock(token: str) -> bool:
+    """Exclusive create; writes the owner token. False when already held."""
     try:
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        try:
-            age = time.time() - LOCK_PATH.stat().st_mtime
-        except OSError:
-            # Held then released between our open and the stat: re-try the
-            # exclusive create instead of running the whole chain unlocked.
-            try:
-                fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except OSError:
-                return False
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(token)
-            return True
-        if age < LOCK_STALE_SECONDS:
-            return False
-        log(f"WARN stale lock ({age:.0f}s old) - taking over")
-        # Take over by rename, not unlink: rename is atomic, so two runs that
-        # both observe the same stale lock cannot both proceed (the loser gets
-        # ENOENT rather than removing the winner's fresh lock).
-        stale = LOCK_PATH.with_name(f"{LOCK_PATH.name}.stale-{os.getpid()}")
-        try:
-            os.replace(str(LOCK_PATH), str(stale))
-            fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except (OSError, FileExistsError):
-            return False
-        finally:
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+        return False
+    except OSError:
+        return False
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(token)
     return True
+
+
+def acquire_lock() -> bool:
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    token = str(os.getpid())
+    if _create_lock(token):
+        return True
+    try:
+        age = time.time() - LOCK_PATH.stat().st_mtime
+    except OSError:
+        # Held then released between our create and the stat: just try again.
+        return _create_lock(token)
+    if age < LOCK_STALE_SECONDS:
+        return False
+    log(f"WARN stale lock ({age:.0f}s old) - taking over")
+    # Serialize takeover through a sidecar claim created with O_EXCL: only one
+    # process can ever hold it, so two runs that both saw the stale lock cannot
+    # both replace it (the previous rename approach could move a winner's
+    # fresh lock aside).
+    claim = LOCK_PATH.with_name(LOCK_PATH.name + ".takeover")
+    try:
+        cfd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            if time.time() - claim.stat().st_mtime < LOCK_STALE_SECONDS:
+                return False  # another taker is working
+            os.unlink(str(claim))  # a crashed taker left it behind
+            cfd = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            return False
+    except OSError:
+        return False
+    try:
+        with os.fdopen(cfd, "w", encoding="utf-8") as handle:
+            handle.write(token)
+        # Re-verify the lock is still the same stale instance before removing
+        # it: if a winner refreshed it while we claimed, stand down.
+        try:
+            if time.time() - LOCK_PATH.stat().st_mtime < LOCK_STALE_SECONDS:
+                return False
+        except OSError:
+            pass
+        try:
+            LOCK_PATH.unlink()
+        except OSError:
+            pass
+        return _create_lock(token)
+    finally:
+        try:
+            claim.unlink()
+        except OSError:
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         # Only remove the lock this run created: a takeover or a skipped run
         # must never delete another process's lock.
         try:
-            if LOCK_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            if LOCK_PATH.read_text(encoding="utf-8", errors="replace").strip() == str(os.getpid()):
                 LOCK_PATH.unlink()
         except OSError:
             pass

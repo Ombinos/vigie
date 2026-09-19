@@ -75,6 +75,13 @@ class FeedParsing(unittest.TestCase):
         self.assertEqual(stats["item_nodes"], 2)
         self.assertEqual(stats["dropped_no_url_title"], 1)
 
+    def test_scalar_keeps_quotes_and_comments_apart(self):
+        self.assertEqual(ingest_rss._scalar('"https://x.test/feed" # nightly'),
+                         "https://x.test/feed")
+        self.assertEqual(ingest_rss._scalar('"A # B"'), "A # B")
+        self.assertEqual(ingest_rss._scalar('https://x.test/feed#frag'),
+                         "https://x.test/feed#frag")
+
     def test_html_and_entity_documents_are_failed_feeds(self):
         for xml in (b"<html><body>Access denied</body></html>",
                     b'<!DOCTYPE rss [<!ENTITY x "hello">]><rss/>',
@@ -238,11 +245,14 @@ class CorruptStoreFailSoft(unittest.TestCase):
             old.write_text("{}", encoding="utf-8")
             newest = d / "20260918T060000Z_candidates.json"
             newest.write_text("{}", encoding="utf-8")
+            orphan = d / "20260101T000000Z_candidates.json.999.abcd.tmp"
+            orphan.write_text("partial", encoding="utf-8")
             removed = normalize.prune_candidate_history(
                 d, now=datetime(2026, 9, 19, 12, tzinfo=timezone.utc))
-            self.assertEqual(removed, 1)
+            self.assertEqual(removed, 2)
             self.assertTrue(latest.exists())
             self.assertFalse(old.exists())
+            self.assertFalse(orphan.exists())  # a crashed atomic write is not a store
             self.assertTrue(newest.exists())
 
 

@@ -10,6 +10,12 @@ import rank_display
 
 
 class MovedPinIntegrity(unittest.TestCase):
+    def test_issue_candidate_ids_are_sorted(self) -> None:
+        # Display slices this list, so set-hash order would make rebuilds differ.
+        iss = {"tensions": [{"items": [{"candidate_id": "c"}, {"candidate_id": "a"},
+                                       {"candidate_id": "b"}]}]}
+        self.assertEqual(rank_display.issue_candidate_ids(iss), ["a", "b", "c"])
+
     def test_moved_pin_links_never_dangle_past_the_cap(self) -> None:
         """The Moved strip is capped at 15; a 16th demoted item must link out,
         not to a #pin- anchor that no radar row rendered (staging rejects dead

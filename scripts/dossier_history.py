@@ -144,12 +144,14 @@ def update_history(history: dict, issues: list[dict], edition_ts: str) -> dict:
                 "last_seen": edition_ts,
                 "editions_seen": 1,
                 "editions_missed": 0,
+                "absent_streak": 0,
                 "timeline": [entry],
             }
             continue
         rec["scar"] = issue.get("scar") or rec.get("scar")
         rec["last_seen"] = edition_ts
         rec["editions_seen"] = _safe_int(rec.get("editions_seen")) + 1
+        rec["absent_streak"] = 0  # present: the dormancy clock restarts
         timeline = list(rec.get("timeline") or [])
         timeline.append(entry)
         rec["timeline"] = timeline[-TIMELINE_CAP:]
@@ -157,14 +159,20 @@ def update_history(history: dict, issues: list[dict], edition_ts: str) -> dict:
 
     for iid, rec in dossiers.items():
         if iid not in present:
+            # editions_missed stays the lifetime display fact; absent_streak is
+            # the consecutive-absence clock the prune actually uses, so a
+            # long-lived flickering dossier is never dropped for history it
+            # already paid for.
             rec["editions_missed"] = _safe_int(rec.get("editions_missed")) + 1
+            rec["absent_streak"] = _safe_int(rec.get("absent_streak")) + 1
 
     dossiers = {
         iid: rec
         for iid, rec in dossiers.items()
-        # A dossier present in this edition is never pruned for lifetime
-        # absences: only dormant dossiers are dropped.
-        if iid in present or _safe_int(rec.get("editions_missed")) < MISSED_PRUNE
+        # A dossier present in this edition is never pruned; only a dossier
+        # absent for MISSED_PRUNE consecutive editions is dropped.
+        if iid in present
+        or _safe_int(rec.get("absent_streak", rec.get("editions_missed"))) < MISSED_PRUNE
     }
     if len(dossiers) > DOSSIER_CAP:
         keep = sorted(

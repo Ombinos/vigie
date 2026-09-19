@@ -12,12 +12,14 @@ import argparse
 import ast
 import functools
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +29,7 @@ import serve
 import stage_public
 
 ROOT = Path(__file__).resolve().parents[1]
+MAX_FETCH_AGE_HOURS = 48  # mirrors normalize.MAX_FETCH_AGE_HOURS
 
 
 class Scripts(HTMLParser):
@@ -115,6 +118,67 @@ def smoke_site(directory: Path, manifest: dict) -> None:
     print(f"HTTP: {len(manifest['files'])} files match manifest; GET, HEAD, and homepage pass", flush=True)
 
 
+def _newest_raw_run() -> datetime | None:
+    raw = ROOT / "data" / "raw"
+    newest: datetime | None = None
+    if not raw.is_dir():
+        return None
+    for path in raw.glob("_run_*.json"):
+        try:
+            stamp = datetime.strptime(path.name[5:21], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if newest is None or stamp > newest:
+            newest = stamp
+    return newest
+
+
+def _candidate_count() -> int:
+    try:
+        doc = json.loads((ROOT / "data" / "normalized" / "latest_candidates.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    return int(doc.get("candidate_count") or 0) if isinstance(doc, dict) else 0
+
+
+def guard_offline_rebuild() -> None:
+    """--rebuild writes the live stores, so refuse the two ways it can silently
+    blank the site: snapshots too old to normalize (every source goes stale ->
+    zero candidates) or a rebuild that produced nothing to stage."""
+    newest = _newest_raw_run()
+    if newest is None:
+        raise RuntimeError("--rebuild needs a raw snapshot; run the online pipeline first")
+    age_h = (datetime.now(timezone.utc) - newest).total_seconds() / 3600
+    if age_h > MAX_FETCH_AGE_HOURS:
+        raise RuntimeError(
+            f"--rebuild refused: newest raw snapshot is {age_h:.1f}h old; offline "
+            f"normalize marks sources stale after {MAX_FETCH_AGE_HOURS}h and would "
+            "stage an empty edition")
+    if _candidate_count() == 0:
+        raise RuntimeError("--rebuild produced an empty edition; refusing to stage")
+
+
+def claims_gate() -> None:
+    """Extraction provenance is a release gate, not a dev script: an excerpt
+    that is not contained in its declared source field, or a claim mutated
+    between enrich and cluster, must stop the deploy."""
+    enriched = ROOT / "data" / "normalized" / "latest_enriched.json"
+    issues = ROOT / "data" / "issues" / "latest_issues.json"
+    if not (enriched.exists() and issues.exists()):
+        return
+    import check_claims
+    try:
+        enriched_doc = json.loads(enriched.read_text(encoding="utf-8"))
+        issues_doc = json.loads(issues.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"claim gate could not read the stores: {exc}") from exc
+    report = check_claims.audit_claims(enriched_doc, issues_doc)
+    if not report.get("ok"):
+        first = (report.get("errors") or [{}])[0]
+        raise RuntimeError(
+            f"claim provenance failed: {len(report.get('errors') or [])} error(s); first={first}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
@@ -124,7 +188,10 @@ def main() -> int:
     try:
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests"])
         if args.rebuild:
+            guard_offline_rebuild()
             run([sys.executable, str(ROOT / "scripts" / "pipeline.py"), "--offline"])
+            guard_offline_rebuild()
+        claims_gate()
         syntax_checks(include_pages=not args.code_only)
         if not args.code_only:
             manifest = stage_public.stage()

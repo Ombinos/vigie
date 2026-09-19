@@ -98,16 +98,19 @@ def choose_user_agent(url: str) -> str:
 
 def is_transport_stall(exc: BaseException) -> bool:
     """True only for a server-side transport stall of the honest identity:
-    a timeout, reset, refused connection or truncated HTTP exchange. Local
-    failures (DNS resolution, TLS trust, the SSRF guard) are never blamed on
-    the origin and never switch identity. HTTP refusals are handled by the
-    caller and never reach this predicate."""
-    if isinstance(exc, (socket.gaierror, ssl.SSLError)):
+    a timeout, reset, refused connection, truncated exchange or a TLS
+    handshake the server aborted. Local failures (DNS resolution, certificate
+    trust, the SSRF guard) are never blamed on the origin and never switch
+    identity. HTTP refusals are handled by the caller and never reach this
+    predicate."""
+    if isinstance(exc, (socket.gaierror, ssl.SSLCertVerificationError, ssl.CertificateError,
+                        http.client.InvalidURL, http.client.UnknownProtocol)):
         return False
     reason = getattr(exc, "reason", None)
     if isinstance(reason, BaseException):
         return is_transport_stall(reason)
-    return isinstance(exc, (TimeoutError, ConnectionError, http.client.HTTPException))
+    return isinstance(exc, (TimeoutError, ConnectionError, http.client.HTTPException,
+                            urllib.error.ContentTooShortError, ssl.SSLError))
 
 
 def mark_browser_identity(url: str, reason: str) -> None:
@@ -130,12 +133,15 @@ def mark_browser_identity(url: str, reason: str) -> None:
 
 def _scalar(val: str):
     val = val.strip()
-    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+    quoted = (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))
+    if quoted:
         return val[1:-1]
     # YAML comments start at a '#' that begins the value or follows whitespace;
-    # a '#' inside a URL or a quoted value is data, never a comment.
+    # a '#' inside a URL is data, never a comment.
     if val.startswith("#") or " #" in val:
         val = val.split("#", 1)[0].strip()
+    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+        return val[1:-1]
     if val in ("", "|", ">", "null", "~"):
         return None
     if val.lower() in ("true", "false"):
@@ -399,12 +405,14 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
                             return cached_body, entry.get("content_type")
                         break  # validator without body: refetch unconditionally
                     # An HTTP refusal is respected: never identity-switched, and
-                    # a 4xx is final for this URL - retrying it and paying the
-                    # unconditional second pass adds no fact and loses politeness.
-                    # A 5xx may be transient, so it keeps the normal retries.
+                    # a 4xx on the plain request is final for this URL. But a
+                    # 4xx raised *because of* the validators (412, a proxy that
+                    # dislikes If-None-Match) is the very case the unconditional
+                    # second pass exists for - so let it fall through first.
                     last_err = e
                     if 400 <= e.code < 500:
-                        refused = True
+                        if not conditional:
+                            refused = True
                         break
                     continue
                 except Exception as e:

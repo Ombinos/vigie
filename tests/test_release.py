@@ -4,8 +4,10 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import os
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -61,6 +63,27 @@ class StaticRelease(unittest.TestCase):
         (self.root / "ranking.md").unlink()
         with self.assertRaisesRegex(ValueError, "ranking.md"):
             stage_public.stage(self.root, self.output)
+
+    def test_missing_explorer_blocks_release(self):
+        (self.public / "explorer.html").unlink()
+        with self.assertRaisesRegex(ValueError, "explorer.html"):
+            stage_public.stage(self.root, self.output)
+
+    def test_data_scheme_link_blocks_release(self):
+        (self.public / "index.html").write_text(
+            '<img src="data:image/png;base64,AAAA">', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            stage_public.stage(self.root, self.output)
+
+    def test_stale_stage_leftovers_are_swept(self):
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        stale = self.output.parent / ".vigie-stage-dead"
+        stale.mkdir()
+        (stale / "junk").write_text("x", encoding="utf-8")
+        old = time.time() - 2 * 24 * 3600
+        os.utime(stale, (old, old))
+        stage_public.stage(self.root, self.output)
+        self.assertFalse(stale.exists())
 
     def test_failed_replacement_restores_previous_release(self):
         stage_public.stage(self.root, self.output)
@@ -181,6 +204,29 @@ class PipelineModes(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 pipeline.main()
         self.assertNotIn("stage_public.py", [call.args[0] for call in run.call_args_list])
+
+
+class ReleaseGuards(unittest.TestCase):
+    def test_offline_rebuild_refuses_missing_or_stale_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(verify, "ROOT", root):
+                with self.assertRaises(RuntimeError):
+                    verify.guard_offline_rebuild()  # no raw snapshot at all
+                (root / "data" / "raw").mkdir(parents=True)
+                (root / "data" / "raw" / "_run_20200101T000000Z.json").write_text(
+                    "{}", encoding="utf-8")
+                with self.assertRaises(RuntimeError):
+                    verify.guard_offline_rebuild()  # stale -> would empty the edition
+
+    def test_claims_gate_is_a_noop_without_stores(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(verify, "ROOT", Path(tmp)):
+                verify.claims_gate()  # must not raise on a fresh checkout
+
+    def test_claims_gate_passes_on_the_live_edition(self) -> None:
+        # The real stores are exactly what refresh.py's verify step will see.
+        verify.claims_gate()
 
 
 if __name__ == "__main__":

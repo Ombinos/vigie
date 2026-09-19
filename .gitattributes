@@ -1,0 +1,16 @@
+# Vigie is authored with LF endings. core.autocrlf=true on Windows would
+# otherwise rewrite checked-out text to CRLF on the next checkout, which breaks
+# the minimal sources.yaml parser (it splits on a literal "\n") and the
+# pipeline's stamped filenames. Keep text LF everywhere.
+* text=auto eol=lf
+
+# Real binaries must never be normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.avif binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

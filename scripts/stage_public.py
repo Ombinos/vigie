@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import tempfile
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -96,6 +97,36 @@ def _safe_remove(path: Path, parent: Path) -> None:
         shutil.rmtree(path)
 
 
+STALE_STAGE_SECONDS = 24 * 3600
+
+
+def _sweep_stale_siblings(parent: Path, output_name: str) -> None:
+    """Remove .vigie-stage-*/.vigie-previous-* leftovers older than a day.
+
+    A hard crash between the rename and the cleanup would otherwise park the
+    previous release and accumulate orphans forever; normal exceptions are
+    already handled by the restore path. Fail-soft: a sweep problem never
+    blocks staging.
+    """
+    try:
+        now = time.time()
+        for entry in parent.iterdir():
+            if entry.name == output_name:
+                continue
+            if not entry.name.startswith((".vigie-stage-", ".vigie-previous-")):
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                if now - entry.stat().st_mtime < STALE_STAGE_SECONDS:
+                    continue
+                _safe_remove(entry, parent)
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
 def stage(root: Path = ROOT, output: Path = OUT) -> dict:
     root = root.resolve()
     public = root / "public"
@@ -127,6 +158,7 @@ def stage(root: Path = ROOT, output: Path = OUT) -> dict:
                 raise ValueError(f"Unsupported public asset: {relative}")
             assets.append(source)
     output.parent.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_siblings(output.parent, output.name)
     temporary = Path(tempfile.mkdtemp(prefix=".vigie-stage-", dir=output.parent))
     backup: Path | None = None
     try:

@@ -27,6 +27,7 @@ MAX_FETCH_AGE_HOURS = 48
 FUTURE_TOLERANCE_MINUTES = 15
 HISTORY_RETENTION_DAYS = 30  # stamped candidate snapshots (mirrors raw retention)
 STAMPED_NAME_RE = re.compile(r"^(\d{8})T\d{6}Z_candidates\.json$")
+STAMPED_TMP_RE = re.compile(r"^(\d{8})T\d{6}Z_candidates\.json\..*\.tmp$")
 TRACKING_PARAMS = {"fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid", "igshid"}
 
 
@@ -102,12 +103,21 @@ def prune_candidate_history(out_dir: Path, days: int = HISTORY_RETENTION_DAYS,
     cutoff = (now - timedelta(days=days)).strftime("%Y%m%d")
     removed = 0
     try:
-        stamped = sorted(p for p in out_dir.iterdir()
-                         if p.is_file() and STAMPED_NAME_RE.match(p.name))
+        entries = [p for p in out_dir.iterdir() if p.is_file()]
     except OSError:
         return 0
+    stamped = sorted(p for p in entries if STAMPED_NAME_RE.match(p.name))
     for path in stamped[:-1]:  # the newest stamped snapshot always survives
         if STAMPED_NAME_RE.match(path.name).group(1) < cutoff:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+    # Orphaned temp files from a crashed atomic write are never a store.
+    for path in entries:
+        m = STAMPED_TMP_RE.match(path.name)
+        if m and m.group(1) < cutoff:
             try:
                 path.unlink()
                 removed += 1
