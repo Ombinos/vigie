@@ -20,7 +20,6 @@ ISSUES = ROOT / "data" / "issues" / "latest_issues.json"
 ROADWORKS = ROOT / "data" / "roadworks" / "latest_roadworks.json"
 EDGES = ROOT / "data" / "edges" / "latest_edges.json"
 ANOMALIES = ROOT / "data" / "anomalies" / "latest_verdict.json"
-FACES = ROOT / "data" / "media" / "latest_faces.json"
 OUT_JSON = ROOT / "data" / "normalized" / "latest_ranked.json"
 OUT_HTML = ROOT / "public" / "index.html"
 
@@ -276,7 +275,9 @@ def item_topics(c: dict) -> list[str]:
     return [str(t.get("topic")) for t in topics if isinstance(t, dict) and t.get("topic")]
 
 
-def issue_candidate_ids(iss: dict) -> set[str]:
+def issue_candidate_ids(iss: dict) -> list[str]:
+    """Sorted candidate ids: callers slice this list for display, so a set's
+    per-process hash order would make byte-identical rebuilds impossible."""
     ids: set[str] = set()
     for t in iss.get("tensions") or []:
         if not isinstance(t, dict):
@@ -287,7 +288,7 @@ def issue_candidate_ids(iss: dict) -> set[str]:
             cid = it.get("candidate_id")
             if cid:
                 ids.add(str(cid))
-    return ids
+    return sorted(ids)
 
 
 def build_continuity(issues: list[dict], ranked: list[dict]) -> dict:
@@ -704,23 +705,27 @@ def approach_button_html(ap: dict) -> str:
 
 
 def load_faces() -> dict[str, dict]:
-    """Publisher faces only — from fetch_media.py. Never invent."""
-    if not FACES.exists():
-        return {}
-    try:
-        return dict(json.loads(FACES.read_text(encoding="utf-8")).get("faces") or {})
-    except Exception:
-        return {}
+    """Faces are disabled.
+
+    The store is written by fetch_media.py, which no pipeline or refresh step
+    runs, so the page rendered faces frozen days behind the edition (mostly
+    stale ids), and every image was a remote hotlink to the city site — which
+    the attribution posture (R2: publisher images only, re-hosted locally)
+    rejects. The seam stays named so a future same-origin /media store can be
+    reintroduced deliberately.
+    """
+    return {}
 
 
 def face_img(cid: str | None, faces: dict[str, dict] | None, *, css: str = "face") -> str:
-    """Equal skeleton: publisher og:image or empty strip of the same height. Never stock."""
+    """Equal skeleton: same-origin publisher image or empty strip. Never stock,
+    never a remote hotlink."""
     empty = f"<div class='{css} face-empty' aria-hidden='true'></div>"
     if not cid or not faces:
         return empty
     rec = faces.get(str(cid)) or {}
     url = rec.get("image_url")
-    if not url:
+    if not isinstance(url, str) or not url.startswith("/media/"):
         return empty
     return (
         f"<img class='{css}' src=\"{esc(url)}\" alt=\"\" loading=\"lazy\" "
@@ -1156,9 +1161,6 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
     # Ensure Near me demotions stay findable even if not in province ordered set
     seen_booth = {(c.get("url") or "") for c in demoted_booth_items}
     booth_rest = [c for c in prov_booths if (c.get("url") or "") not in seen_booth]
-    for c in demoted_booth_items:
-        if (c.get("url") or "") not in {(x.get("url") or "") for x in prov_booths}:
-            pass  # still include in moved via demoted_booth_items lead
     prov_impact = prov_life[:DISPLAY_CAP]
     prov_moved: list[dict] = []
     seen_m: set[str] = set()
@@ -1261,14 +1263,14 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
         compass_bits.append(
             f"<button type='button' class='fight-btn' data-i='{i}' data-mode='fight'>"
             f"<span class='fight-q'>{q}</span>"
-            f"<span class='fight-meta'>{topic} · {iss.get('source_count', 0)} voices"
+            f"<span class='fight-meta'>{topic} · {esc(str(iss.get('source_count', 0)))} voices"
             + (
-                f" · official {iss.get('official_voice_count', 0)}"
+                f" · official {esc(str(iss.get('official_voice_count', 0)))}"
                 if iss.get("official_voice_count")
                 else " · media remix"
             )
             + (
-                f" · silent {silence.get('silent_count', 0)}"
+                f" · silent {esc(str(silence.get('silent_count', 0)))}"
                 if silence.get("silent_count") is not None
                 else ""
             )
@@ -1291,19 +1293,26 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
     near_items = "".join(near_rail_item(c, continuity, faces_map, pin=False) for c in buckets["near"]) or "<p class='empty'>Nothing Near me yet.</p>"
     near_note = ""
     if demoted_booth:
+        # A #pin- link is only honest when that pin is actually rendered (the
+        # Moved strip is capped and deduped): anything else links out to the
+        # publisher, so staging can never reject the edition over a dead anchor.
+        pinned_ids = {str(c.get("id")) for c in prov_moved if c.get("id")}
         moved_bits = []
         for c in demoted_booth_items:
             cid = str(c.get("id") or "").strip()
             title = esc((c.get("title") or "(no title)")[:72])
-            if cid:
+            if cid and cid in pinned_ids:
                 moved_bits.append(
                     f"<li><a class='moved-pin' href=\"#pin-{esc(cid)}\">{title}</a></li>"
                 )
-            else:
-                url = esc(link_url(c.get("url")))
+                continue
+            url = esc(link_url(c.get("url")))
+            if url:
                 moved_bits.append(
                     f"<li><a href=\"{url}\" target=\"_blank\" rel=\"noopener\">{title}</a></li>"
                 )
+            else:
+                moved_bits.append(f"<li>{title}</li>")
         moved_list = (
             "<ul class='moved-list'>" + "".join(moved_bits) + "</ul>"
             if moved_bits
@@ -1413,7 +1422,7 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
     )
 
     return f"""<!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -2054,7 +2063,7 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
       </div>
     </div>
     </div>
-    <footer class="site-foot">Aggregate only. Arrival is Approaches from fights on disk — never a painted personalization feed. Beauty without fog: DESIGN.md. Life facets are opt-in and reorder Approaches only (FACETS.md). Lookout field (Radar / Stage / Near me) opens on invitation. Same fight only from scars. Publisher faces via og:image only when present. No infinite scroll. We clarify; we do not bait dwell-time. Links: <a href="/VISION.md">VISION</a> · <a href="/ranking.md">ranking</a> · <a href="/sources.yaml">sources</a> · <a href="/RENT.md">RENT</a> · <a href="/FRICTION.md">FRICTION</a> · <a href="/FACETS.md">FACETS</a> · <a href="/DESIGN.md">DESIGN</a>.</footer>
+    <footer class="site-foot">Aggregate only. Arrival is Approaches from fights on disk — never a painted personalization feed. Beauty without fog: DESIGN.md. Life facets are opt-in and reorder Approaches only (FACETS.md). Lookout field (Radar / Stage / Near me) opens on invitation. Same fight only from scars. No infinite scroll. We clarify; we do not bait dwell-time. Links: <a href="/VISION.md">VISION</a> · <a href="/ranking.md">ranking</a> · <a href="/sources.yaml">sources</a> · <a href="/RENT.md">RENT</a> · <a href="/FRICTION.md">FRICTION</a> · <a href="/FACETS.md">FACETS</a> · <a href="/DESIGN.md">DESIGN</a>.</footer>
   </div>
   <script>
   (function () {{
@@ -2495,10 +2504,18 @@ def main() -> None:
     issues: list[dict] = []
     ledger: dict = {}
     if ISSUES.exists():
-        issues_doc = json.loads(ISSUES.read_text(encoding="utf-8"))
-        issues = issues_doc.get("issues") or []
-        ledger = issues_doc.get("change_ledger") or {}
-        print(f"issues: {len(issues)} from {ISSUES}")
+        try:
+            loaded = json.loads(ISSUES.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict):
+            issues = loaded.get("issues") if isinstance(loaded.get("issues"), list) else []
+            ledger = loaded.get("change_ledger") if isinstance(loaded.get("change_ledger"), dict) else {}
+            print(f"issues: {len(issues)} from {ISSUES}")
+        else:
+            # A corrupt/partial dossier store renders no dossier section instead
+            # of aborting the chain after the ranked store was already written.
+            print(f"issues: unreadable store {ISSUES} - rendering without dossiers")
 
     # Official roadworks store: structured change data, never ranked with articles.
     # A missing or corrupt store renders no section rather than failing the edition.

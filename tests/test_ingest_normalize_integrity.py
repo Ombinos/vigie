@@ -52,6 +52,29 @@ class FeedParsing(unittest.TestCase):
             </item></channel></rss>'''
         self.assertIsNone(ingest_rss.parse_feed(xml)[0]["url"])
 
+    def test_atom_link_namesake_never_steals_the_rss_article_url(self):
+        xml = b'''<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel>
+            <item><title>Story</title>
+            <atom:link rel="self" href="https://news.example/feed"/>
+            <link>https://news.example/story</link></item></channel></rss>'''
+        self.assertEqual(ingest_rss.parse_feed(xml)[0]["url"], "https://news.example/story")
+
+    def test_emails_never_reach_a_bylined_name(self):
+        self.assertEqual(ingest_rss._clean_person("John Doe john@example.com"), "John Doe")
+        self.assertEqual(ingest_rss._clean_person("John Doe <john@example.com>"), "John Doe")
+        self.assertIsNone(ingest_rss._clean_person("john@example.com"))
+
+    def test_dropped_items_are_counted_not_hidden(self):
+        xml = b'''<rss><channel>
+            <item><title>Kept</title><link>https://news.example/a</link></item>
+            <item><description>no title and no link</description></item>
+            </channel></rss>'''
+        stats: dict = {}
+        items = ingest_rss.parse_feed(xml, stats=stats)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(stats["item_nodes"], 2)
+        self.assertEqual(stats["dropped_no_url_title"], 1)
+
     def test_html_and_entity_documents_are_failed_feeds(self):
         for xml in (b"<html><body>Access denied</body></html>",
                     b'<!DOCTYPE rss [<!ENTITY x "hello">]><rss/>',
@@ -181,6 +204,46 @@ class CandidateIntegrity(unittest.TestCase):
         item = normalize.normalize_item({"title": "Story", "source_kind": "official"}, {"source_id": "a", "source_kind": "media", "institution": "publisher"})
         self.assertEqual(item["source_kind"], "media")
         self.assertEqual(item["institution"], "publisher")
+
+
+class CorruptStoreFailSoft(unittest.TestCase):
+    """A corrupt handoff store is diagnosed, never a mid-chain traceback."""
+
+    def test_enrich_diagnoses_a_non_object_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = Path(tmp) / "in.json"
+            inp.write_text("[1, 2, 3]", encoding="utf-8")
+            with mock.patch.multiple(enrich, IN_PATH=inp, OUT_PATH=Path(tmp) / "out.json"):
+                with self.assertRaises(SystemExit) as ctx:
+                    enrich.main()
+            self.assertIn("JSON object", str(ctx.exception))
+
+    def test_enrich_skips_a_malformed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            inp, out = Path(tmp) / "in.json", Path(tmp) / "out.json"
+            inp.write_text(json.dumps({"candidates": [
+                "garbage", {"title": "t", "url": "https://news.example/a"}]}), encoding="utf-8")
+            with mock.patch.multiple(enrich, IN_PATH=inp, OUT_PATH=out):
+                self.assertEqual(enrich.main(), 0)
+            doc = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(doc["candidate_count"], 1)
+            self.assertEqual(doc["skipped_malformed"], 1)
+
+    def test_candidate_history_is_pruned_but_latest_and_newest_survive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            latest = d / "latest_candidates.json"
+            latest.write_text("{}", encoding="utf-8")
+            old = d / "20260101T000000Z_candidates.json"
+            old.write_text("{}", encoding="utf-8")
+            newest = d / "20260918T060000Z_candidates.json"
+            newest.write_text("{}", encoding="utf-8")
+            removed = normalize.prune_candidate_history(
+                d, now=datetime(2026, 9, 19, 12, tzinfo=timezone.utc))
+            self.assertEqual(removed, 1)
+            self.assertTrue(latest.exists())
+            self.assertFalse(old.exists())
+            self.assertTrue(newest.exists())
 
 
 class OfflineRebuildEditionIdentity(unittest.TestCase):

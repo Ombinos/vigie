@@ -28,6 +28,7 @@ from collections import Counter
 from pathlib import Path
 
 import ingest_wzdx
+import store_io
 
 ROOT = Path(__file__).resolve().parents[1]
 ROADWORKS = ROOT / "data" / "roadworks" / "latest_roadworks.json"
@@ -338,7 +339,8 @@ def compile_atlas(rw: dict, issues_doc: dict | None = None, geometry: dict | Non
     return {
         "method": METHOD,
         "status": "proposed",
-        "built_at": rw.get("fetched_at"),
+        "built_at": _latest_stamp(rw.get("fetched_at"),
+                                  (issues_doc or {}).get("clustered_at")),
         "issues_clustered_at": (issues_doc or {}).get("clustered_at"),
         "source_id": rw.get("source_id"),
         "street_count": len(streets),
@@ -368,26 +370,38 @@ def _load_json(path: Path) -> object:
         return None
 
 
+def _latest_stamp(*values: object) -> str | None:
+    """The newest input stamp (data time), never the build clock. A compile
+    that consumed two stores must not claim to predate one of them."""
+    parsed = [(dt, str(value)) for dt, value in
+              ((ingest_wzdx._parse_iso(value), value) for value in values) if dt is not None]
+    return max(parsed)[1] if parsed else None
+
+
 def main(argv: list[str] | None = None) -> int:
-    rw = _load_json(ROADWORKS)
-    if not isinstance(rw, dict) or rw.get("method") != ROADWORKS_METHOD:
-        atlas = empty_atlas(
-            "Aucune collecte officielle exploitable (données absentes, corrompues "
-            "ou d'une autre méthode) : aucun rapprochement proposé."
-        )
-    else:
-        issues_doc = _load_json(ISSUES)
-        geometry = load_geometry(RAW_DIR, rw.get("source_id"))
-        atlas = compile_atlas(rw, issues_doc if isinstance(issues_doc, dict) else {}, geometry)
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(atlas, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
-        shown = OUT_PATH.relative_to(ROOT)
-    except ValueError:
-        shown = OUT_PATH
-    print(f"edge atlas: {atlas['street_count']} street(s), "
-          f"{atlas['matched_issue_count']} matched dossier(s) -> {shown}")
-    # Always 0: the atlas is a reading aid; its absence never blocks an edition.
+        rw = _load_json(ROADWORKS)
+        if not isinstance(rw, dict) or rw.get("method") != ROADWORKS_METHOD:
+            atlas = empty_atlas(
+                "Aucune collecte officielle exploitable (données absentes, corrompues "
+                "ou d'une autre méthode) : aucun rapprochement proposé."
+            )
+        else:
+            issues_doc = _load_json(ISSUES)
+            geometry = load_geometry(RAW_DIR, rw.get("source_id"))
+            atlas = compile_atlas(rw, issues_doc if isinstance(issues_doc, dict) else {}, geometry)
+        store_io.write_json_atomic(OUT_PATH, atlas)
+        try:
+            shown = OUT_PATH.relative_to(ROOT)
+        except ValueError:
+            shown = OUT_PATH
+        print(f"edge atlas: {atlas['street_count']} street(s), "
+              f"{atlas['matched_issue_count']} matched dossier(s) -> {shown}")
+    except (OSError, ValueError) as exc:
+        # Always 0: the atlas is a reading aid; its absence never blocks an
+        # edition, and an unwritable store must not kill the refresh chain.
+        print(f"edge atlas: FAIL {type(exc).__name__}: {exc} - keeping previous store")
+        return 0
     return 0
 
 

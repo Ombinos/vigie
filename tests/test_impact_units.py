@@ -65,6 +65,17 @@ class ImpactUnitsExtract(unittest.TestCase):
         self.assertEqual(units[0]["kind"], "bylaw_id")
         self.assertEqual(str(units[0]["value"]), "96")
 
+    def test_federal_bill_letter_dash_number(self) -> None:
+        units = enrich.propose_impact_units("Le projet de loi C-11 est adopté", "")
+        self.assertEqual(units[0]["kind"], "bylaw_id")
+        self.assertEqual(units[0]["value"], "C-11")
+
+    def test_percent_rule_never_matches_inside_a_longer_word(self) -> None:
+        # "cut" lives inside "exécuté": a substring match would invent a price
+        # percent with no price context anywhere in the sentence.
+        units = enrich.propose_impact_units("Le chantier est exécuté à 50 %", "")
+        self.assertEqual(units, [])
+
     def test_housing_count(self) -> None:
         units = enrich.propose_impact_units(
             "La Ville annonce 120 logements sociaux à Limoilou", ""

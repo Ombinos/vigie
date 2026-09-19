@@ -24,7 +24,7 @@ if str(SCRIPTS) not in sys.path:
 import rank_display as rd  # noqa: E402
 from ingest_rss import (  # noqa: E402
     public_http_url, public_opener, choose_user_agent, mark_browser_identity,
-    USER_AGENT, FALLBACK_USER_AGENT,
+    is_transport_stall, USER_AGENT, FALLBACK_USER_AGENT,
 )
 
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
@@ -142,9 +142,10 @@ def fetch_html(url: str, *, retries: int = 2, diag: dict | None = None) -> str |
         except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
             reason = "article_timeout" if _is_timeout(exc) else "article_network_error"
             last = (reason, f"{type(exc).__name__}: {exc}")
-            if ua == USER_AGENT:
-                # Transport-level stall of the honest identity: mark the host
-                # and continue under the disclosed browser identity.
+            if ua == USER_AGENT and is_transport_stall(exc):
+                # Server-side stall of the honest identity: mark the host and
+                # continue under the disclosed browser identity. Local failures
+                # and HTTP refusals never switch identity.
                 mark_browser_identity(url, type(exc).__name__)
                 ua = FALLBACK_USER_AGENT
                 headers["User-Agent"] = ua

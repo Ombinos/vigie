@@ -158,12 +158,14 @@ def reorder_approaches(
     """Reorder a copy of Approaches by facet score. Same set. Store index tie-break.
 
     Empty / unknown facets → original store order (annotated copy).
-    Never drops rows. Never mutates input list objects in place beyond annotate copy.
+    Never drops a row: a malformed (non-object) row cannot be scored and keeps
+    its original relative order at the end. Never mutates input list objects.
     """
     annotated = annotate_approaches(approaches, issues)
+    others = [ap for ap in (approaches or []) if not isinstance(ap, dict)]
     ids = normalize_facet_ids(active_facets)
     if not ids:
-        return annotated
+        return annotated + others
     decorated = [
         (
             -facet_score(ap, ids),
@@ -173,14 +175,15 @@ def reorder_approaches(
         for i, ap in enumerate(annotated)
     ]
     decorated.sort(key=lambda t: (t[0], t[1]))
-    return [deepcopy(t[2]) for t in decorated]
+    return [deepcopy(t[2]) for t in decorated] + others
 
 
 def same_approach_set(before: list[dict], after: list[dict]) -> bool:
     """Identity: same issue_ids as a multiset — reorder only."""
-    a = sorted(str(x.get("issue_id") or "") for x in (before or []))
-    b = sorted(str(x.get("issue_id") or "") for x in (after or []))
-    return a == b
+    def ids(rows: list[dict] | None) -> list[str]:
+        return sorted(str(x.get("issue_id") or "") for x in (rows or []) if isinstance(x, dict))
+
+    return ids(before) == ids(after)
 
 
 def catalog_payload() -> dict:

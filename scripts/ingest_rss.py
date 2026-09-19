@@ -40,6 +40,7 @@ TIMEOUT = 25
 RETRIES = 3
 MAX_FEED_BYTES = 8 * 1024 * 1024
 RETENTION_DAYS = 30  # raw snapshot retention (LEGAL_RISK.md R6)
+UA_POLICY_MAX_AGE_DAYS = 30  # re-probe the browser identity after this window
 
 # CBC often resets Python urllib; URL alternates stay as a second path.
 URL_ALTERNATES = {
@@ -52,8 +53,6 @@ URL_ALTERNATES = {
         "https://www.cbc.ca/webfeed/rss/rss-politics",
     ],
 }
-
-ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
 def utc_now() -> datetime:
@@ -72,13 +71,43 @@ def _load_ua_policy() -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
+def _policy_is_fresh(entry: dict) -> bool:
+    marked = entry.get("marked_at")
+    if not isinstance(marked, str):
+        return False
+    try:
+        when = datetime.fromisoformat(marked)
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return utc_now() - when <= timedelta(days=UA_POLICY_MAX_AGE_DAYS)
+
+
 def choose_user_agent(url: str) -> str:
-    """Honest identity by default; disclosed browser identity for hosts that
-    have stalled an automated reader at transport level (never for refusals)."""
+    """Honest identity by default; the disclosed browser identity only for a
+    host that stalled an automated reader at transport level (never for a
+    refusal), and only while the marker is fresh. A stale marker is re-probed
+    under the honest identity, so one bad network day cannot switch a host
+    forever."""
     entry = _load_ua_policy().get(_host_of(url))
-    if isinstance(entry, dict) and entry.get("identity") == "browser":
+    if isinstance(entry, dict) and entry.get("identity") == "browser" and _policy_is_fresh(entry):
         return FALLBACK_USER_AGENT
     return USER_AGENT
+
+
+def is_transport_stall(exc: BaseException) -> bool:
+    """True only for a server-side transport stall of the honest identity:
+    a timeout, reset, refused connection or truncated HTTP exchange. Local
+    failures (DNS resolution, TLS trust, the SSRF guard) are never blamed on
+    the origin and never switch identity. HTTP refusals are handled by the
+    caller and never reach this predicate."""
+    if isinstance(exc, (socket.gaierror, ssl.SSLError)):
+        return False
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException):
+        return is_transport_stall(reason)
+    return isinstance(exc, (TimeoutError, ConnectionError, http.client.HTTPException))
 
 
 def mark_browser_identity(url: str, reason: str) -> None:
@@ -101,14 +130,16 @@ def mark_browser_identity(url: str, reason: str) -> None:
 
 def _scalar(val: str):
     val = val.strip()
-    if "#" in val:
+    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+        return val[1:-1]
+    # YAML comments start at a '#' that begins the value or follows whitespace;
+    # a '#' inside a URL or a quoted value is data, never a comment.
+    if val.startswith("#") or " #" in val:
         val = val.split("#", 1)[0].strip()
     if val in ("", "|", ">", "null", "~"):
         return None
     if val.lower() in ("true", "false"):
         return val.lower() == "true"
-    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-        return val[1:-1]
     if re.fullmatch(r"-?\d+", val):
         return int(val)
     return val
@@ -318,6 +349,7 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
             validators["If-None-Match"] = entry["etag"]
         if isinstance(entry.get("last_modified"), str) and entry["last_modified"]:
             validators["If-Modified-Since"] = entry["last_modified"]
+        refused = False
         for conditional in ((True, False) if validators else (False,)):
             for attempt in range(1, RETRIES + 1):
                 try:
@@ -366,18 +398,27 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
                         if cached_body is not None:
                             return cached_body, entry.get("content_type")
                         break  # validator without body: refetch unconditionally
-                    last_err = e  # an HTTP refusal is respected, never identity-switched
+                    # An HTTP refusal is respected: never identity-switched, and
+                    # a 4xx is final for this URL - retrying it and paying the
+                    # unconditional second pass adds no fact and loses politeness.
+                    # A 5xx may be transient, so it keeps the normal retries.
+                    last_err = e
+                    if 400 <= e.code < 500:
+                        refused = True
+                        break
                     continue
                 except Exception as e:
-                    if ua == USER_AGENT and isinstance(e, (OSError, http.client.HTTPException)):
-                        # Transport-level stall of the automated-reader identity
-                        # (the CBC scar): mark the host and retry under the
-                        # disclosed browser identity. Guard refusals (ValueError)
-                        # and HTTP refusals never land here.
+                    if ua == USER_AGENT and is_transport_stall(e):
+                        # Server-side stall of the honest identity (the CBC
+                        # scar): mark the host and retry under the disclosed
+                        # browser identity. Local failures and refusals never
+                        # land here.
                         mark_browser_identity(candidate, type(e).__name__)
                         ua = FALLBACK_USER_AGENT
                     last_err = e
                     continue
+            if refused:
+                break
     assert last_err is not None
     raise last_err
 
@@ -399,20 +440,42 @@ def _child(el: ET.Element, name: str) -> ET.Element | None:
     return next((child for child in el if _local(child.tag).lower() == name.lower()), None)
 
 
+def _link_text(item: ET.Element) -> str | None:
+    """The article URL from an RSS/RDF item <link>.
+
+    An item is often preceded by a namespaced <atom:link rel="self" href="…"/>
+    whose URL lives in an attribute and whose text is empty. Matching the first
+    child by local name would let that namesake steal the article URL and drop
+    the item silently, so prefer an unnamespaced <link> that carries text."""
+    fallback = None
+    for child in item:
+        if _local(child.tag).lower() != "link":
+            continue
+        text = _text(child)
+        if not text:
+            continue
+        if isinstance(child.tag, str) and not child.tag.startswith("{"):
+            return text
+        fallback = fallback or text
+    return fallback
+
+
 EMAIL_AUTHOR_RE = re.compile(r"^\S+@\S+\s*\(([^)]+)\)")
+EMAIL_TOKEN_RE = re.compile(r"\S*@\S*")
 
 
 def _clean_person(value: str | None, limit: int = 120) -> str | None:
-    """Person fields can arrive as 'mail (Name)' (RSS 2.0 author). A bare
-    e-mail address is not a displayable name - dropped, never published."""
+    """Person fields can arrive as 'mail (Name)' (RSS 2.0 author), as a bare
+    e-mail, or as 'Name <mail>' / 'Name mail'. An e-mail address is never a
+    displayable name: it is dropped, never published."""
     if not isinstance(value, str) or not value.strip():
         return None
     value = " ".join(value.split())
     m = EMAIL_AUTHOR_RE.match(value)
     if m:
-        value = m.group(1).strip()
-    elif "@" in value and " " not in value:
-        return None
+        value = m.group(1)
+    value = " ".join(EMAIL_TOKEN_RE.sub(" ", value).split())
+    value = value.strip(" -–—,;|<>()[]")
     return value[:limit] or None
 
 
@@ -438,7 +501,8 @@ def _item_credit(item: ET.Element) -> str | None:
     return None
 
 
-def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
+def parse_feed(xml_bytes: bytes, base_url: str | None = None,
+               stats: dict | None = None) -> list[dict]:
     if len(xml_bytes) > MAX_FEED_BYTES:
         raise ValueError("Feed exceeds size limit")
     if re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", xml_bytes.replace(b"\x00", b""), re.I):
@@ -450,7 +514,7 @@ def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
         nodes = [n for n in root.iter() if _local(n.tag).lower() == "item"]
         for item in nodes:
             title = _text(_child(item, "title"))
-            link = _text(_child(item, "link"))
+            link = _link_text(item)
             if not link:
                 guid_el = _child(item, "guid")
                 if guid_el is not None and guid_el.attrib.get("isPermaLink", "true").lower() != "false":
@@ -494,7 +558,7 @@ def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
             for child in entry:
                 loc = _local(child.tag).lower()
                 if loc in ("summary", "content"):
-                    summary = _text(child) or ("".join(child.itertext()).strip() or None)
+                    summary = _text(child)
                     if summary:
                         break
             published = _text(_child(entry, "published"))
@@ -527,7 +591,13 @@ def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
         for item in items:
             if item.get("url"):
                 item["url"] = urljoin(base_url, item["url"])
-    return [it for it in items if it.get("url") or it.get("title")]
+    kept = [it for it in items if it.get("url") or it.get("title")]
+    if stats is not None:
+        # "every miss must be diagnosed": an item carrying neither URL nor
+        # title is dropped downstream, so it is counted here, never hidden.
+        stats["item_nodes"] = len(items)
+        stats["dropped_no_url_title"] = len(items) - len(kept)
+    return kept
 
 
 def sha256_hex(data: bytes) -> str:
@@ -566,8 +636,9 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
 
     parse_error = None
     items: list[dict] = []
+    parse_stats: dict = {}
     try:
-        items = parse_feed(raw, url)
+        items = parse_feed(raw, url, parse_stats)
     except Exception as e:
         parse_error = f"{type(e).__name__}: {e}"
 
@@ -605,6 +676,7 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
         "sha256": digest,
         "xml_file": rel_or_abs(xml_path),
         "raw_item_count": raw_item_count,
+        "dropped_no_url_title": parse_stats.get("dropped_no_url_title", 0),
         "not_modified": not_modified,
         "max_items": max_items if isinstance(max_items, int) else None,
         "capped": capped,
@@ -635,15 +707,17 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
     return payload
 
 
-SNAP_STAMP_RE = re.compile(r"^(?:_run_)?(\d{8})T\d{6}Z")
+SNAP_STAMP_RE = re.compile(r"^(?:_run_)?(\d{8}T\d{6}Z)")
 
 
 def prune_raw_snapshots(raw_dir: Path | None = None, days: int = RETENTION_DAYS,
                         now: datetime | None = None) -> int:
     """Retention law (RENT.md, LEGAL_RISK.md R6): raw snapshots older than the
-    window are deleted; the newest snapshot of every source (and the newest
-    run log) always survives, so offline rebuilds keep working. Fail-soft:
-    a pruning problem never fails the ingest."""
+    window are deleted; the newest snapshot *pair* of every source (and the
+    newest run log) always survives, so offline rebuilds keep working. Files
+    are grouped by their full stamp, so an XML snapshot and the meta that
+    describes it are pruned together, never split. Fail-soft: a pruning
+    problem never fails the ingest."""
     raw_dir = Path(raw_dir) if raw_dir is not None else RAW_DIR
     now = now or utc_now()
     cutoff = (now - timedelta(days=days)).strftime("%Y%m%d")
@@ -651,9 +725,18 @@ def prune_raw_snapshots(raw_dir: Path | None = None, days: int = RETENTION_DAYS,
 
     def prune_group(files: list[Path]) -> None:
         nonlocal removed
-        for path in files[:-1]:  # the newest snapshot always survives
+        groups: dict[str, list[Path]] = {}
+        for path in files:
             m = SNAP_STAMP_RE.match(path.name)
-            if m and m.group(1) < cutoff:
+            if m:
+                groups.setdefault(m.group(1), []).append(path)
+        if not groups:
+            return
+        newest = max(groups)
+        for stamp, members in groups.items():
+            if stamp == newest or stamp[:8] >= cutoff:
+                continue
+            for path in members:
                 try:
                     path.unlink()
                     removed += 1
@@ -690,6 +773,7 @@ def main() -> int:
             "source_id": result["source_id"],
             "ok": result["ok"],
             "item_count": result.get("item_count", 0),
+            "dropped_no_url_title": result.get("dropped_no_url_title", 0),
             "error": result.get("error"),
             "parse_error": result.get("parse_error"),
             "xml_file": result.get("xml_file"),

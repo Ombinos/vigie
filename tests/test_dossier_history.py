@@ -81,6 +81,22 @@ class UpdateHistory(unittest.TestCase):
         self.assertEqual(h2["dossiers"]["a"]["editions_seen"], 1)
         self.assertEqual(h2["edition_count"], 1)
 
+    def test_a_present_dossier_is_never_pruned_for_lifetime_absences(self) -> None:
+        history = {
+            "method": dossier_history.METHOD,
+            "updated_at": TS1,
+            "edition_count": 5,
+            "dossiers": {
+                "a": {"first_seen": TS1, "last_seen": TS1, "editions_seen": 1,
+                      "editions_missed": dossier_history.MISSED_PRUNE + 5},
+            },
+        }
+        h = dossier_history.update_history(history, [issue("a")], TS2)
+        # A dossier present in this edition is active, not dormant: its lifetime
+        # absence counter must not erase a dossier the reader can still see.
+        self.assertIn("a", h["dossiers"])
+        self.assertEqual(h["dossiers"]["a"]["editions_seen"], 2)
+
     def test_older_snapshot_ignored(self) -> None:
         h = dossier_history.update_history(dossier_history.empty_history(), [issue("a")], TS2)
         h2 = dossier_history.update_history(h, [issue("a"), issue("b")], TS1)

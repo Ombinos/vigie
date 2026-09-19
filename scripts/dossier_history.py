@@ -66,6 +66,19 @@ def _is_after(new_ts: str, old_ts: str) -> bool:
     return new_ts > old_ts
 
 
+def _chrono_key(value: object) -> tuple[int, object]:
+    """Sort key that compares mixed-offset ISO stamps chronologically, exactly
+    like _is_after (a string sort would order '+00:00' before 'Z' for the same
+    instant and keep the wrong dossiers under the cap)."""
+    text = str(value or "")
+    dt = _parse_ts(text)
+    if dt is None:
+        return (0, text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (1, dt)
+
+
 def empty_history() -> dict:
     return {"method": METHOD, "updated_at": None, "edition_count": 0, "dossiers": {}}
 
@@ -149,12 +162,14 @@ def update_history(history: dict, issues: list[dict], edition_ts: str) -> dict:
     dossiers = {
         iid: rec
         for iid, rec in dossiers.items()
-        if _safe_int(rec.get("editions_missed")) < MISSED_PRUNE
+        # A dossier present in this edition is never pruned for lifetime
+        # absences: only dormant dossiers are dropped.
+        if iid in present or _safe_int(rec.get("editions_missed")) < MISSED_PRUNE
     }
     if len(dossiers) > DOSSIER_CAP:
         keep = sorted(
             dossiers,
-            key=lambda iid: (str(dossiers[iid].get("last_seen") or ""), iid),
+            key=lambda iid: (_chrono_key(dossiers[iid].get("last_seen")), iid),
             reverse=True,
         )[:DOSSIER_CAP]
         dossiers = {iid: dossiers[iid] for iid in keep}

@@ -29,6 +29,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import store_io
+
 ROOT = Path(__file__).resolve().parent.parent
 IN_PATH = ROOT / "data" / "normalized" / "latest_candidates.json"
 OUT_PATH = ROOT / "data" / "normalized" / "latest_enriched.json"
@@ -164,7 +166,7 @@ RE_PRICE_CAD = re.compile(
     re.I,
 )
 RE_PRICE_PCT_HAUSSE = re.compile(
-    rf"(?:hausse|augmentation|baisse|increase|decrease|cut).{{0,48}}?{RE_NUM}\s*%",
+    rf"\b(?:hausse|augmentation|baisse|increase|decrease|cut)\b.{{0,48}}?{RE_NUM}\s*%",
     re.I,
 )
 RE_PRICE_PCT_CTX = re.compile(
@@ -173,7 +175,7 @@ RE_PRICE_PCT_CTX = re.compile(
     re.I,
 )
 RE_BYLAW = re.compile(
-    r"(?:projet\s+de\s+loi|bill)\s*(?:n[o°º]\.?\s*)?([C\-]?[A-Z]?\d[\w\-]*)|"
+    r"(?:projet\s+de\s+loi|bill)\s*(?:n[o°º]\.?\s*)?([A-Z]?-?\d{1,4}(?:-\d+)?[A-Z]?)|"
     r"r[èe]glement\s*(?:municipal\s*)?(?:n[o°º]\.?\s*)?([A-Z]?\d[\w\-.]*)|"
     r"\bbylaw\s*(?:no\.?\s*)?([A-Z]?\d[\w\-.]*)|"
     r"\bloi\s+(\d{1,3})\b",
@@ -656,9 +658,23 @@ def main() -> int:
     if not IN_PATH.exists():
         print(f"Missing {IN_PATH}. Run normalize first.")
         return 1
-    payload = json.loads(IN_PATH.read_text(encoding="utf-8"))
-    cands = payload.get("candidates") or []
-    enriched = [enrich_one(c) for c in cands]
+    try:
+        payload = json.loads(IN_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Unreadable {IN_PATH}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{IN_PATH} must be a JSON object with a candidates list")
+    cands = payload.get("candidates")
+    cands = cands if isinstance(cands, list) else []
+    enriched: list[dict] = []
+    skipped = 0
+    for c in cands:
+        if not isinstance(c, dict):
+            # Same fail-soft posture as cluster_issues: a malformed entry is
+            # diagnosed by its count, never a traceback that kills the chain.
+            skipped += 1
+            continue
+        enriched.append(enrich_one(c))
     now = datetime.now(timezone.utc)
     with_claims = sum(1 for c in enriched if c["enrich"]["claims"])
     with_units = sum(
@@ -678,6 +694,7 @@ def main() -> int:
         "source_status": payload.get("source_status") or {},
         "normalized_at": payload.get("normalized_at"),
         "candidate_count": len(enriched),
+        "skipped_malformed": skipped,
         "candidates_with_claims": with_claims,
         "candidates_with_impact_units": with_units,
         "candidates": enriched,
@@ -686,7 +703,7 @@ def main() -> int:
         out_show = OUT_PATH.relative_to(ROOT)
     except ValueError:
         out_show = OUT_PATH
-    OUT_PATH.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    store_io.write_json_atomic(OUT_PATH, out)
     topics_n = sum(
         1
         for c in enriched

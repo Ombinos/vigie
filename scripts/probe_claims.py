@@ -1,4 +1,8 @@
-"""PLAN probe: which claim shapes exist in latest_enriched.json."""
+"""PLAN probe: which claim shapes exist in latest_enriched.json.
+
+A developer probe, never part of the edition. Safe to import: all I/O happens
+inside main(), and a missing or corrupt store is reported, not raised.
+"""
 from __future__ import annotations
 
 import json
@@ -7,9 +11,6 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CANDS = json.loads(
-    (ROOT / "data/normalized/latest_enriched.json").read_text(encoding="utf-8")
-)["candidates"]
 
 PATS = {
     "guillemets_fr": re.compile(r"«\s*.{8,180}?\s*»"),
@@ -32,42 +33,68 @@ PATS = {
     ),
 }
 
-hits: Counter = Counter()
-examples: dict[str, list] = {k: [] for k in PATS}
 
-for c in CANDS:
-    title = c.get("title") or ""
-    summary = c.get("summary") or ""
-    blob = f"{title} {summary}".strip()
-    for k, p in PATS.items():
-        m = p.search(title if k == "speaker_colon_title" else blob)
-        if not m:
+def main() -> int:
+    try:
+        payload = json.loads(
+            (ROOT / "data/normalized/latest_enriched.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        print(f"probe_claims: no enriched store to probe ({type(exc).__name__}: {exc})")
+        return 0
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        print("probe_claims: enriched store has no candidates list")
+        return 0
+
+    hits: Counter = Counter()
+    examples: dict[str, list] = {k: [] for k in PATS}
+    for c in candidates:
+        if not isinstance(c, dict):
             continue
-        hits[k] += 1
-        if len(examples[k]) < 4:
-            examples[k].append(
-                {
-                    "source_id": c.get("source_id"),
-                    "title": title[:120],
-                    "match": m.group(0)[:140],
-                    "groups": [g[:80] if isinstance(g, str) else g for g in m.groups()],
-                }
-            )
+        title = c.get("title") or ""
+        summary = c.get("summary") or ""
+        blob = f"{title} {summary}".strip()
+        for k, p in PATS.items():
+            m = p.search(title if k == "speaker_colon_title" else blob)
+            if not m:
+                continue
+            hits[k] += 1
+            if len(examples[k]) < 4:
+                examples[k].append(
+                    {
+                        "source_id": c.get("source_id"),
+                        "title": title[:120],
+                        "match": m.group(0)[:140],
+                        "groups": [g[:80] if isinstance(g, str) else g for g in m.groups()],
+                    }
+                )
 
-out = {
-    "n": len(CANDS),
-    "hits": dict(hits),
-    "examples": examples,
-    "empty_claims_now": sum(
-        1 for c in CANDS if not ((c.get("enrich") or {}).get("claims") or [])
-    ),
-}
-path = ROOT / "data/normalized/_probe_claims.json"
-path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-print("n", out["n"], "hits", out["hits"], "empty", out["empty_claims_now"])
-print("wrote", path)
-for k, exs in examples.items():
-    print("---", k, "n=", hits[k])
-    for e in exs[:2]:
-        print(" ", e["source_id"], "|", e["title"])
-        print("   ", e["match"])
+    out = {
+        "n": len(candidates),
+        "hits": dict(hits),
+        "examples": examples,
+        "empty_claims_now": sum(
+            1 for c in candidates
+            if isinstance(c, dict) and not ((c.get("enrich") or {}).get("claims") or [])
+        ),
+    }
+    try:
+        path = ROOT / "data/normalized/_probe_claims.json"
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"probe_claims: WARN report not written ({exc})")
+        path = None
+    print("n", out["n"], "hits", out["hits"], "empty", out["empty_claims_now"])
+    if path is not None:
+        print("wrote", path)
+    for k, exs in examples.items():
+        print("---", k, "n=", hits[k])
+        for e in exs[:2]:
+            print(" ", e["source_id"], "|", e["title"])
+            print("   ", e["match"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

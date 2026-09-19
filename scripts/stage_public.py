@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "deploy" / "public"
 METHODS = ("VISION.md", "ranking.md", "sources.yaml", "RENT.md", "FRICTION.md", "FACETS.md", "DESIGN.md", "edge.md", "anomalies.md", "legal.md")
-REQUIRED_ASSETS = ("index.html", "morning.html", "favicon.svg")
+REQUIRED_ASSETS = ("index.html", "morning.html", "explorer.html", "favicon.svg")
 ASSET_EXTENSIONS = {
     ".html", ".css", ".js", ".mjs", ".svg", ".png", ".jpg", ".jpeg",
     ".webp", ".avif", ".gif", ".ico", ".woff", ".woff2", ".txt",
@@ -65,7 +65,7 @@ def validate_site(directory: Path) -> list[str]:
         for attr, raw in page.links:
             link = urlsplit(raw)
             if link.scheme or link.netloc:
-                if link.scheme.lower() not in {"https", "http", "mailto", "tel", "data", ""}:
+                if link.scheme.lower() not in {"https", "http", "mailto", "tel", ""}:
                     errors.append(f"{path.relative_to(base)}: unsafe {attr} scheme")
                 continue
             decoded = unquote(link.path)

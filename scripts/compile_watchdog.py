@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +50,9 @@ OUT_JSON = OPS / "watchdog.json"
 
 METHOD = "watchdog-v1"
 WEEK_HISTORY_CAP = 26
-LOG_TAIL_LINES = 240
+# The 7-day window is the law; the tail only bounds memory. 5000 lines covers
+# well over a week at the observed ~25 lines per 6-hourly run.
+LOG_TAIL_LINES = 5000
 MISSING_IMAGES_ATTENTION = 5
 MISSING_IMAGES_RISE = 3
 CHURN_ATTENTION = 15
@@ -69,9 +71,12 @@ def _parse_ts(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return None
+    # A hand-edited or legacy naive stamp is read as UTC rather than mixed with
+    # aware stamps, where max() would raise and kill the whole refresh chain.
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
 def _disk_bytes(root: Path) -> int:
@@ -92,9 +97,12 @@ def read_refresh_log(path: Path = REFRESH_LOG, tail: int = LOG_TAIL_LINES,
                      window_days: int = 7) -> dict:
     """Facts from the recent refresh log.
 
-    `fails` counts FAIL lines inside the window ending at the log's last
-    activity; `fails_since_ok` counts only those after the most recent
-    successful production deploy - the "is the machine broken NOW" fact.
+    Only top-level timestamped lines are facts. refresh.py echoes pipeline
+    stdout and multi-line error tails into the same file; those continuation
+    lines have no timestamp and must never be counted as separate failures
+    (nor be allowed to hide the real ones). `fails` counts FAIL lines inside
+    the window ending at the log's last activity; `fails_since_ok` counts only
+    those after the most recent successful production deploy.
     """
     try:
         lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
@@ -102,30 +110,31 @@ def read_refresh_log(path: Path = REFRESH_LOG, tail: int = LOG_TAIL_LINES,
         return {"available": False, "fails": 0, "fails_since_ok": 0,
                 "last_deploy": None, "last_activity": None, "window_lines": 0}
 
-    def stamp_of(line: str) -> str | None:
-        return line.split(" ", 1)[0] if line.strip() else None
+    def parse_line(line: str) -> tuple[str, str] | None:
+        stamp, _, msg = line.strip().partition(" ")
+        if line.strip() and not line.lstrip().startswith("|") and _parse_ts(stamp):
+            return stamp, msg
+        return None
 
-    def is_fail(line: str) -> bool:
-        return " FAIL " in line or line.rstrip().endswith("FAIL")
-
-    last_deploy = next((stamp_of(ln) for ln in reversed(lines)
-                        if "OK production updated" in ln), None)
-    last_activity = next((stamp_of(ln) for ln in reversed(lines) if ln.strip()), None)
+    entries = [p for p in (parse_line(ln) for ln in lines) if p is not None]
+    last_deploy = next((stamp for stamp, msg in reversed(entries)
+                        if "OK production updated" in msg), None)
+    last_activity = entries[-1][0] if entries else None
     anchor = _parse_ts(last_activity)
-    last_ok_index = max((i for i, ln in enumerate(lines) if "OK production updated" in ln),
-                        default=-1)
+    last_ok_index = max((i for i, (_, msg) in enumerate(entries)
+                         if "OK production updated" in msg), default=-1)
     fails = fails_since_ok = 0
-    for i, ln in enumerate(lines):
-        if not is_fail(ln):
+    for i, (stamp, msg) in enumerate(entries):
+        if not msg.startswith("FAIL"):
             continue
-        ts = _parse_ts(stamp_of(ln))
+        ts = _parse_ts(stamp)
         if ts is None or anchor is None or (anchor - ts).days <= window_days:
             fails += 1
             if i > last_ok_index:
                 fails_since_ok += 1
     return {"available": True, "fails": fails, "fails_since_ok": fails_since_ok,
             "last_deploy": last_deploy, "last_activity": last_activity,
-            "window_lines": len(lines)}
+            "window_lines": len(entries)}
 
 
 def compile_watchdog(ops_dir: Path | None = None, data_dir: Path | None = None,
@@ -153,9 +162,19 @@ def compile_watchdog(ops_dir: Path | None = None, data_dir: Path | None = None,
     reference = max(stamps) if stamps else None
     week = f"{reference.isocalendar()[0]}-W{reference.isocalendar()[1]:02d}" if reference else "unknown"
 
+    # Health is a claim about facts. With no readable ledger at all the only
+    # honest verdict is blindness: never "the machine is healthy".
+    has_feed_facts = bool(feed.get("sources") if isinstance(feed.get("sources"), dict) else False)
+    has_media_facts = bool(media.get("latest")) if isinstance(media.get("latest"), dict) else False
+    has_metrics_facts = isinstance(metrics.get("latest"), dict) and bool(metrics.get("latest"))
+    has_log_facts = bool(log.get("available") and log.get("last_activity"))
+    facts_present = has_feed_facts or has_media_facts or has_metrics_facts or has_log_facts
+
     # --- attention rules (fixed thresholds over ledger facts) ---
     attention: list[str] = []
     watch: list[str] = []
+    if not facts_present:
+        attention.append("no ledger facts available: the machine room is blind, not healthy")
     feed_sources = feed.get("sources") if isinstance(feed.get("sources"), dict) else {}
     for name, src in sorted(feed_sources.items()):
         if isinstance(src, dict) and src.get("status") in ("failing", "dead"):
@@ -188,6 +207,7 @@ def compile_watchdog(ops_dir: Path | None = None, data_dir: Path | None = None,
     snapshot = {
         "week": week,
         "reference": reference.isoformat() if reference else None,
+        "facts": facts_present,
         "attention": attention,
         "watch": watch,
         "feed": {
@@ -250,8 +270,10 @@ def _render_markdown(snap: dict, feed_sources: dict, media_latest: dict, weeks: 
     ]
     if snap["attention"]:
         lines += [f"- {line}" for line in snap["attention"]]
-    else:
+    elif snap.get("facts"):
         lines.append("Nothing. The machine is healthy.")
+    else:
+        lines.append("No facts. The machine room is blind; health is unknown.")
     if snap["watch"]:
         lines += ["", "## Watch", ""] + [f"- {line}" for line in snap["watch"]]
     lines += ["", "## Sources (feed-health-v1)", "",
@@ -305,8 +327,10 @@ def main(argv: list[str] | None = None) -> int:
     if snap["attention"]:
         for line in snap["attention"]:
             print(f"  ! {line}")
-    else:
+    elif snap.get("facts"):
         print("  attention: nothing - the machine is healthy")
+    else:
+        print("  attention: no facts available - health unknown")
     return 0
 
 

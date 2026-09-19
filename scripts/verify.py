@@ -101,7 +101,10 @@ def smoke_site(directory: Path, manifest: dict) -> None:
                     if response.headers.get("X-Content-Type-Options") != "nosniff":
                         raise RuntimeError(f"Missing safe content-type header: {name}")
                 with urlopen(Request(f"{base}/{name}", method="HEAD"), timeout=5) as response:
-                    if int(response.headers["Content-Length"]) != meta["bytes"] or response.read():
+                    # A missing/odd Content-Length is a failed verification, not
+                    # a KeyError traceback.
+                    declared = response.headers.get("Content-Length")
+                    if not (declared and declared.isdigit()) or int(declared) != meta["bytes"] or response.read():
                         raise RuntimeError(f"Incorrect HEAD response: {name}")
             with urlopen(base + "/", timeout=5) as response:
                 if hashlib.sha256(response.read()).hexdigest() != manifest["files"]["index.html"]["sha256"]:

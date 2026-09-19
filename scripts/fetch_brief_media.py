@@ -63,7 +63,8 @@ import fetch_media  # noqa: E402  (fetch_html, extract_og, safe_image_url, TIMEO
 import resident_brief as brief  # noqa: E402  (safe_url - identity must match the renderer)
 from ingest_rss import (  # noqa: E402
     MAX_FEED_BYTES, public_http_url, public_opener,
-    choose_user_agent, mark_browser_identity, USER_AGENT, FALLBACK_USER_AGENT,
+    choose_user_agent, mark_browser_identity, is_transport_stall,
+    USER_AGENT, FALLBACK_USER_AGENT,
 )
 import ingest_rss  # noqa: E402  (_item_credit - one attribution parser, one law)
 
@@ -182,9 +183,10 @@ def fetch_image(url: str, referer: str = "", *, retries: int = 2,
         except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
             reason = "image_timeout" if fetch_media._is_timeout(exc) else "image_network_error"
             last = (reason, f"{type(exc).__name__}: {exc}")
-            if ua == USER_AGENT:
-                # Transport-level stall of the honest identity: mark the host
-                # and continue under the disclosed browser identity.
+            if ua == USER_AGENT and is_transport_stall(exc):
+                # Server-side stall of the honest identity: mark the host and
+                # continue under the disclosed browser identity. Local failures
+                # and HTTP refusals never switch identity.
                 mark_browser_identity(url, type(exc).__name__)
                 ua = FALLBACK_USER_AGENT
                 headers["User-Agent"] = ua

@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = ROOT / "data" / "ops" / "refresh.log"
 LOCK_PATH = ROOT / "data" / "ops" / "refresh.lock"
 LOCK_STALE_SECONDS = 2 * 3600
+LOG_ROTATE_BYTES = 5 * 1024 * 1024  # one previous log kept as refresh.log.1
 TEAM = "deemto"
 PROJECT = "vigie"
 DEPLOY_DIR = ROOT / "deploy" / "public"
@@ -44,6 +45,11 @@ def log(line: str) -> None:
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print(f"{stamp} {line}", flush=True)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > LOG_ROTATE_BYTES:
+            os.replace(str(LOG_PATH), str(LOG_PATH.with_suffix(".log.1")))
+    except OSError:
+        pass
     with LOG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(f"{stamp} {line}\n")
 
@@ -76,23 +82,41 @@ def run_step(name: str, command: list[str], timeout: int, cwd: Path = ROOT) -> N
 
 def acquire_lock() -> bool:
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    token = str(os.getpid())
     try:
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         try:
             age = time.time() - LOCK_PATH.stat().st_mtime
         except OSError:
-            return True  # vanished between open and stat; caller proceeds
+            # Held then released between our open and the stat: re-try the
+            # exclusive create instead of running the whole chain unlocked.
+            try:
+                fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except OSError:
+                return False
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(token)
+            return True
         if age < LOCK_STALE_SECONDS:
             return False
         log(f"WARN stale lock ({age:.0f}s old) - taking over")
+        # Take over by rename, not unlink: rename is atomic, so two runs that
+        # both observe the same stale lock cannot both proceed (the loser gets
+        # ENOENT rather than removing the winner's fresh lock).
+        stale = LOCK_PATH.with_name(f"{LOCK_PATH.name}.stale-{os.getpid()}")
         try:
-            LOCK_PATH.unlink()
+            os.replace(str(LOCK_PATH), str(stale))
             fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except (OSError, FileExistsError):
             return False
+        finally:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(str(os.getpid()))
+        handle.write(token)
     return True
 
 
@@ -138,7 +162,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         run_step(
             "deploy",
-            [vercel, "deploy", str(DEPLOY_DIR), "-y", "--no-wait", "--prod"],
+            # No --no-wait: the CLI exiting 0 means the deployment was created,
+            # not that production serves the new edition. Waiting (bounded by
+            # the step timeout) makes the OK line below a fact.
+            [vercel, "deploy", str(DEPLOY_DIR), "-y", "--prod"],
             timeout=900,
         )
         log("OK production updated")
@@ -147,8 +174,11 @@ def main(argv: list[str] | None = None) -> int:
         log(f"FAIL {exc}")
         return 1
     finally:
+        # Only remove the lock this run created: a takeover or a skipped run
+        # must never delete another process's lock.
         try:
-            LOCK_PATH.unlink()
+            if LOCK_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                LOCK_PATH.unlink()
         except OSError:
             pass
 

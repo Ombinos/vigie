@@ -40,6 +40,7 @@ if str(SCRIPTS) not in sys.path:
 import change_ledger  # noqa: E402
 import dossier_history  # noqa: E402
 import ingest_rss  # noqa: E402
+import store_io  # noqa: E402
 
 IN_PATH = ROOT / "data" / "normalized" / "latest_enriched.json"
 OUT_ISSUES = ROOT / "data" / "issues" / "latest_issues.json"
@@ -292,6 +293,23 @@ def published_when(c: dict) -> datetime | None:
     return None
 
 
+def edition_when(payload: dict) -> datetime | None:
+    """The collection clock this edition represents (normalize's normalized_at),
+    never the rebuild clock. The 7-day publication window is measured against
+    the edition, so re-running the cluster over a stale store cannot exclude
+    every dated candidate and wipe the live dossier store."""
+    raw = payload.get("normalized_at") if isinstance(payload, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        return None  # never use the build machine's local timezone as edition truth
+    return dt.astimezone(timezone.utc)
+
+
 def folded(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", text.lower()) if not unicodedata.combining(c))
 
@@ -431,7 +449,10 @@ def main() -> None:
     institutions = collapse_institutions(chancellery)
     inst_name = {i["institution_id"]: i["institution_name"] for i in institutions}
 
-    instant = datetime.now(timezone.utc)
+    # Window law: the 7-day publication window is measured against the edition
+    # (normalize's normalized_at), never the rebuild clock - a standalone rerun
+    # over a stale enriched store must not wipe the live dossier store.
+    instant = edition_when(payload) or datetime.now(timezone.utc)
     excluded = Counter()
     accepted = []
     seen = set()
@@ -632,8 +653,8 @@ def main() -> None:
         },
         "issues": issues,
     }
-    OUT_ISSUES.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    store_io.write_json_atomic(OUT_ISSUES, out)
+    store_io.write_json_atomic(history_path, history)
     print(f"issues {len(issues)} (dropped single-voice {dropped_single}) -> {OUT_ISSUES}")
     for i in issues[:8]:
         print("-", i["scar"], "|", i["question"][:90], "| voices", i["source_count"], "| geos", i["geo_focus"])

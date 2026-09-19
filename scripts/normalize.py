@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -15,6 +16,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote_plus, urlparse, urlunparse
 
+import store_io
 from ingest_rss import load_enabled_rss, public_http_url
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,8 @@ OUT_DIR = ROOT / "data" / "normalized"
 SOURCES_PATH = ROOT / "sources.yaml"
 MAX_FETCH_AGE_HOURS = 48
 FUTURE_TOLERANCE_MINUTES = 15
+HISTORY_RETENTION_DAYS = 30  # stamped candidate snapshots (mirrors raw retention)
+STAMPED_NAME_RE = re.compile(r"^(\d{8})T\d{6}Z_candidates\.json$")
 TRACKING_PARAMS = {"fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid", "igshid"}
 
 
@@ -69,7 +73,8 @@ def collection_timestamp(metas: list[Path], fallback: datetime) -> datetime:
     """
     for path in sorted(RAW_DIR.glob("_run_*.json"), reverse=True):
         try:
-            stamp = parse_timestamp(json.loads(path.read_text(encoding="utf-8")).get("fetched_at"))
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            stamp = parse_timestamp(doc.get("fetched_at")) if isinstance(doc, dict) else None
         except (OSError, ValueError):
             continue
         if stamp:
@@ -77,12 +82,38 @@ def collection_timestamp(metas: list[Path], fallback: datetime) -> datetime:
     stamps: list[datetime] = []
     for path in metas:
         try:
-            stamp = parse_timestamp(json.loads(path.read_text(encoding="utf-8")).get("fetched_at"))
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            stamp = parse_timestamp(doc.get("fetched_at")) if isinstance(doc, dict) else None
         except (OSError, ValueError):
             continue
         if stamp:
             stamps.append(stamp)
     return max(stamps) if stamps else fallback
+
+
+def prune_candidate_history(out_dir: Path, days: int = HISTORY_RETENTION_DAYS,
+                            now: datetime | None = None) -> int:
+    """Retention law: stamped candidate snapshots older than the window are
+    deleted; latest_candidates.json and the newest stamped snapshot always
+    survive, so an offline rebuild and a diff always have an input. Fail-soft:
+    a pruning problem never fails the normalize step."""
+    out_dir = Path(out_dir)
+    now = now or utc_now()
+    cutoff = (now - timedelta(days=days)).strftime("%Y%m%d")
+    removed = 0
+    try:
+        stamped = sorted(p for p in out_dir.iterdir()
+                         if p.is_file() and STAMPED_NAME_RE.match(p.name))
+    except OSError:
+        return 0
+    for path in stamped[:-1]:  # the newest stamped snapshot always survives
+        if STAMPED_NAME_RE.match(path.name).group(1) < cutoff:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 def latest_meta_files(sources: list[dict] | None = None) -> list[Path]:
@@ -250,19 +281,26 @@ def main() -> int:
         payload.update({"source_id": source_id, "source_name": source.get("name"),
                         **{key: source.get(key) for key in ("institution", "institution_name", "geo", "nest_role", "source_kind", "language")}})
         n = 0
+        dropped = {"not_an_item": 0, "no_title_or_url": 0, "duplicate_id": 0}
+        item_nodes = len(payload.get("items") or [])
         for it in payload.get("items") or []:
             if not isinstance(it, dict):
+                dropped["not_an_item"] += 1
                 continue
             cand = normalize_item(it, payload)
             if not cand:
+                dropped["no_title_or_url"] += 1
                 continue
             if cand["id"] in seen_ids:
+                dropped["duplicate_id"] += 1
                 continue
             seen_ids.add(cand["id"])
             candidates.append(cand)
             n += 1
         per_source[source_id] = n
-        source_status[source_id] = {"status": "ok", "fetched_at": fetched.isoformat(), "candidate_count": n}
+        source_status[source_id] = {"status": "ok", "fetched_at": fetched.isoformat(),
+                                    "candidate_count": n, "item_nodes": item_nodes,
+                                    "dropped": dropped}
         print(f"  {source_id}: {n} candidates from {meta_path.name}")
 
     out = {
@@ -275,11 +313,14 @@ def main() -> int:
         "candidates": candidates,
     }
     out_path = OUT_DIR / f"{stamp}_candidates.json"
-    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    store_io.write_json_atomic(out_path, out)
     latest = OUT_DIR / "latest_candidates.json"
-    latest.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    store_io.write_json_atomic(latest, out)
     print(f"wrote {out_path} ({len(candidates)} unique)")
     print(f"wrote {latest}")
+    pruned = prune_candidate_history(OUT_DIR)
+    if pruned:
+        print(f"pruned {pruned} candidate snapshot(s) older than {HISTORY_RETENTION_DAYS} days")
     return 0
 
 

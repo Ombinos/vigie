@@ -74,8 +74,16 @@ def plain(value: object) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", text)).strip()
 
 
+# Folding law: ligatures and typographic apostrophes are mapped before the
+# diacritics are stripped, so the client fold in brief.js and this server-side
+# search index agree (searching "oeuvre" must match a stored "œuvre").
+_FOLD_LIGATURES = str.maketrans({"œ": "oe", "Œ": "oe", "æ": "ae", "Æ": "ae",
+                                 "’": "'", "‘": "'", "`": "'", "´": "'"})
+
+
 def folded(value: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(c))
+    mapped = str(value).translate(_FOLD_LIGATURES)
+    return "".join(c for c in unicodedata.normalize("NFKD", mapped.casefold()) if not unicodedata.combining(c))
 
 
 def safe_url(value: object) -> str:
@@ -900,7 +908,7 @@ def article_html(item: dict, index: int, related: list[dict], media: dict | None
     # feed gives one - s. 29.2 requires source AND author for news reporting.
     author = plain(item.get("author"))[:120]
     byline_author = f'Par {esc(author)}<span aria-hidden="true"> · </span>' if author else ""
-    peers = "".join(f'<li><span>{esc(r.get("source_name") or r.get("source_id"))}</span><a href="{esc(r["url"])}" rel="noopener noreferrer">{esc(r["title"])}</a>{date_html(r["published"])}</li>' for r in related)
+    peers = "".join(f'<li><span>{esc(r.get("source_name") or r.get("source_id"))}</span><a href="{esc(safe_url(r.get("url")))}" rel="noopener noreferrer">{esc(r.get("title"))}</a>{date_html(r.get("published"))}</li>' for r in related)
     related_html = f'<p class="evidence-label">Autres articles du dossier proposé</p><ul class="source-list">{peers}</ul><p class="fine">Rapprochement automatique à vérifier. Plusieurs médias ne constituent pas plusieurs confirmations indépendantes.</p>' if peers else '<p class="fine">Aucun autre article rapproché dans cette collecte. Cela ne dit rien de la couverture ailleurs.</p>'
     kind = '<span class="official">Source officielle</span>' if item.get("source_kind") == "official" else ''
     place_reason = "Un lieu ou acteur local a été repéré dans le titre ou l’extrait." if item["geo"] == "quebec-city" else "Le classement géographique est proposé à partir du titre et de l’extrait."
@@ -909,14 +917,14 @@ def article_html(item: dict, index: int, related: list[dict], media: dict | None
     # The search index carries exactly what the reader sees (title + displayed
     # excerpt), never the fuller internal summary (LEGAL_RISK.md R4).
     search_text = esc(folded(item['title'] + ' ' + excerpt_base + ' ' + str(item.get('source_name', ''))))
-    return f'''<article class="story" id="article-{item['uid']}" data-id="{item['uid']}" data-geo="{esc(item['geo'])}" data-topics="{esc(' '.join(item['topics']))}" data-areas="{esc(' '.join(item['areas']))}" data-search="{search_text}" data-published="{esc(item['published'])}">
+    return f'''<article class="story" id="article-{esc(item['uid'])}" data-id="{esc(item['uid'])}" data-geo="{esc(item['geo'])}" data-topics="{esc(' '.join(item['topics']))}" data-areas="{esc(' '.join(item['areas']))}" data-search="{search_text}" data-published="{esc(item['published'])}">
       <div class="story-number" aria-hidden="true">{index:02}</div><div class="story-body">
       {media_html}<div class="story-kicker"><span>{esc(topic)}</span><span>{geo}</span>{kind}<span class="new-label" hidden>Nouveau dans la collecte</span></div>
-      <h3><a href="{esc(item['url'])}" rel="noopener noreferrer">{title}<span class="arrow" aria-hidden="true"> ↗</span></a></h3>
+      <h3><a href="{esc(safe_url(item['url']))}" rel="noopener noreferrer">{title}<span class="arrow" aria-hidden="true"> ↗</span></a></h3>
       <p class="byline">{byline_author}{source}<span aria-hidden="true"> · </span>{date_html(item['published'])}{'<span class="language">Article en anglais</span>' if item.get('language') == 'en' else ''}</p>
       {excerpt_html}
       <div class="story-actions"><details class="evidence"><summary>Sources et contexte <span aria-hidden="true">＋</span></summary><div class="evidence-body"><p>{place_reason} Ce repérage ne prouve pas un effet sur votre situation.</p>{related_html}</div></details>
-      <button class="save js-only" type="button" data-save="{item['uid']}" aria-pressed="false" aria-label="Garder : {title}">Garder <span aria-hidden="true">＋</span></button></div>
+      <button class="save js-only" type="button" data-save="{esc(item['uid'])}" aria-pressed="false" aria-label="Garder : {title}">Garder <span aria-hidden="true">＋</span></button></div>
       </div></article>'''
 
 
@@ -954,7 +962,7 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 <body><a class="skip-link" href="#essentiel">Aller aux nouvelles</a>
 <header class="masthead"><a class="wordmark" href="/" aria-label="Vigie, accueil"><svg width="28" height="32" viewBox="0 0 28 32" aria-hidden="true"><path d="M2 5 14 28 26 5M8 5l6 12 6-12" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>vigie<span class="wordmark-dot">.</span></a><span class="edition">QUÉBEC, À HAUTEUR DE VIE</span><nav aria-label="Navigation principale"><a href="#essentiel">Le point</a><a href="#dossiers">Les dossiers</a><a href="#agir">Repères utiles</a><a href="#methode">Notre méthode</a></nav></header>
 <main><section class="intro" aria-labelledby="intro-title"><div><p class="eyebrow">UNE VILLE. VOTRE QUOTIDIEN.</p><h1 id="intro-title">Moins de bruit.<br><em>Plus de Québec.</em></h1><p class="intro-text">Les nouvelles locales. Les sources pour comprendre. Les repères pour agir. Puis, reprenez votre journée.</p></div>
-<aside class="edition-note" aria-label="Fraîcheur des informations"><div class="compass" aria-hidden="true"><span>N</span><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="43"/><path d="M60 5v22M60 93v22M5 60h22M93 60h22M60 31l13 42-13-8-13 8Z"/></svg></div><p class="eyebrow">LE POINT DE REPÈRE</p><p id="freshness-label" class="freshness{' warning' if status['stale'] or status['partial'] else ''}" data-fetched="{esc(status['at'])}" data-partial="{str(status['partial']).lower()}" data-total="{status['total']}" data-ok="{status['ok']}">{status_label}</p><p class="edition-time">{date_html(status['at'], fallback='Aucune collecte horodatée')}</p><a class="coverage-link" href="#couverture">{coverage} <span aria-hidden="true">↗</span></a><p class="fine">Un instantané des sources. Pas un service d’alerte en temps réel.</p></aside></section>
+<aside class="edition-note" aria-label="Fraîcheur des informations"><div class="compass" aria-hidden="true"><span>N</span><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="43"/><path d="M60 5v22M60 93v22M5 60h22M93 60h22M60 31l13 42-13-8-13 8Z"/></svg></div><p class="eyebrow">LE POINT DE REPÈRE</p><p id="freshness-label" role="status" class="freshness{' warning' if status['stale'] or status['partial'] else ''}" data-fetched="{esc(status['at'])}" data-partial="{str(status['partial']).lower()}" data-total="{status['total']}" data-ok="{status['ok']}">{status_label}</p><p class="edition-time">{date_html(status['at'], fallback='Aucune collecte horodatée')}</p><a class="coverage-link" href="#couverture">{coverage} <span aria-hidden="true">↗</span></a><p class="fine">Un instantané des sources. Pas un service d’alerte en temps réel.</p></aside></section>
 <section class="brief" id="essentiel" aria-labelledby="brief-title"><div class="section-top"><div><p class="eyebrow">L’ESSENTIEL, À VOTRE ÉCHELLE</p><h2 id="brief-title">Faire le point.</h2></div><p class="section-note">7 jours de publications.<br>Édition du {date_html(generated_at)}.</p></div>
 <div class="visit-strip js-only"><p id="visit-status" role="status">Une première visite ? Prenez vos repères.</p><button id="remember" type="button">Mémoriser ce point de lecture</button></div>
 <div class="controls js-only"><div class="view-tabs" role="group" aria-label="Vue des articles"><button type="button" data-view="brief" aria-pressed="true">Le point local</button><button type="button" data-view="new" aria-pressed="false">Depuis mon repère <span id="new-count"></span></button><button type="button" data-view="saved" aria-pressed="false">Mes articles gardés <span id="saved-count"></span></button></div>

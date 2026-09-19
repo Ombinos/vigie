@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +36,7 @@ YIELD_WINDOW = 10         # ok-runs considered for the yield trend
 DEAD_AFTER_HOURS = 72     # no successful collection for three days
 FAILING_STREAK = 3        # consecutive failures before "failing"
 NOT_MODIFIED_WINDOW = 10  # recent runs counted for the 304 rate
+FUTURE_TOLERANCE_HOURS = 24  # a collection stamp beyond this is a clock anomaly
 
 STATUSES = ("healthy", "degraded", "failing", "dead")
 
@@ -149,10 +150,17 @@ def compile_health(raw_dir: Path | None = None, out_path: Path | None = None) ->
             if timeline:
                 timelines[src_dir.name] = timeline
 
+    # The reference is a data stamp, never a clock read; the only use of the
+    # wall clock is a sanity ceiling, so one phantom future stamp (laptop
+    # sleep before NTP) cannot mark every healthy source dead.
+    ceiling = datetime.now(timezone.utc) + timedelta(hours=FUTURE_TOLERANCE_HOURS)
     reference: datetime | None = None
     for timeline in timelines.values():
-        if reference is None or timeline[-1]["at"] > reference:
-            reference = timeline[-1]["at"]
+        at = timeline[-1]["at"]
+        if at > ceiling:
+            continue
+        if reference is None or at > reference:
+            reference = at
 
     sources: dict[str, dict] = {}
     attention: list[str] = []
@@ -176,7 +184,9 @@ def compile_health(raw_dir: Path | None = None, out_path: Path | None = None) ->
             status = "dead"
         elif failures >= FAILING_STREAK:
             status = "failing"
-        elif failures >= 1 or parse_errors >= 1 or trend == "falling":
+        elif failures >= 1 or trend == "falling":
+            # A parse error is a failure with parse_error set, so it is already
+            # covered by `failures >= 1`; no separate branch pretends otherwise.
             status = "degraded"
         else:
             status = "healthy"

@@ -147,14 +147,30 @@ def compile_metrics(ranked_path: Path | None = None, issues_path: Path | None = 
         history = [h for h in previous_doc["history"] if isinstance(h, dict)]
 
     ranked_doc = _load_json(ranked_path)
+    issues_doc = _load_json(issues_path)
+    history_doc = _load_json(history_path)
+    roadworks_doc = _load_json(roadworks_path)
+    media_doc = _load_json(media_path)
+    feed_doc = _load_json(feed_health_path)
+    current_edition = ranked_snapshot(ranked_doc)[0]
+    same_edition_as_last = bool(
+        history and current_edition and history[-1].get("edition") == current_edition)
+    # Recompiling the same edition must compare against the edition BEFORE it,
+    # never against itself: history[-1] is this edition, so using it as the
+    # previous top would zero the churn and silently falsify the ledger.
+    previous_top = None
+    if same_edition_as_last:
+        if len(history) >= 2 and isinstance(history[-2].get("top_ids"), list):
+            previous_top = history[-2]["top_ids"]
+    elif history and isinstance(history[-1].get("top_ids"), list):
+        previous_top = history[-1]["top_ids"]
     entry = edition_entry(
-        ranked_doc, _load_json(issues_path), _load_json(history_path),
-        _load_json(roadworks_path), _load_json(media_path), _load_json(feed_health_path),
-        previous_top=history[-1].get("top_ids") if history else None,
+        ranked_doc, issues_doc, history_doc, roadworks_doc, media_doc, feed_doc,
+        previous_top=previous_top,
     )
 
     # Idempotent: recompiling the same edition replaces its snapshot.
-    if history and entry.get("edition") and history[-1].get("edition") == entry["edition"]:
+    if same_edition_as_last:
         history[-1] = entry
     else:
         history.append(entry)

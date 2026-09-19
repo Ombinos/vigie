@@ -60,6 +60,9 @@ def build_digest(
     # Rebuilding an undated/empty store is not a new collection of news.
     c_at = clustered_at or clustered_at_from_issues(issues or [], "")
     pulse = rank_display.pulse_payload(approaches, c_at)
+    # Same filter-then-slice as rank_display.build_approaches: a malformed entry
+    # must not shift the idx- fallback keys and misattribute a publisher.
+    fight_issues = [x for x in (issues or []) if isinstance(x, dict)][:rank_display.APPROACH_MAX]
     return {
         "kind": "morning_digest",
         "method": METHOD,
@@ -76,8 +79,7 @@ def build_digest(
                 "label_source": iss.get("label_source"),
                 "evidence": iss.get("evidence") or {},
             }
-            for i, iss in enumerate((issues or [])[:rank_display.APPROACH_MAX])
-            if isinstance(iss, dict)
+            for i, iss in enumerate(fight_issues)
         },
         "identity": {
             "issue_ids": [str(a.get("issue_id") or "") for a in approaches],
@@ -117,11 +119,13 @@ def digest_matches_arrival_pulse(digest: dict, approaches: list[dict]) -> bool:
 
 
 def stage_fight_issue_ids(issues: list[dict]) -> list[str]:
-    """Stage panels = same store fights Arrival/Ambient present (cap APPROACH_MAX)."""
+    """Stage panels = same store fights Arrival/Ambient present (cap APPROACH_MAX).
+
+    Filter then slice, exactly like build_approaches: slicing first would let a
+    malformed entry shift the cap and make the twin guard fail spuriously.
+    """
     out: list[str] = []
-    for iss in (issues or [])[: rank_display.APPROACH_MAX]:
-        if not isinstance(iss, dict):
-            continue
+    for iss in [x for x in (issues or []) if isinstance(x, dict)][: rank_display.APPROACH_MAX]:
         out.append(str(iss.get("issue_id") or iss.get("scar") or ""))
     return out
 
@@ -423,15 +427,26 @@ def write_digest(digest: dict) -> dict[str, Path]:
 
 
 def load_store() -> tuple[list[dict], list[dict], str | None]:
+    """Read the stores fail-soft: a corrupt file means no facts, never a crash
+    after the ranked store was already written."""
     issues: list[dict] = []
     if ISSUES.exists():
-        issues = json.loads(ISSUES.read_text(encoding="utf-8")).get("issues") or []
+        try:
+            loaded = json.loads(ISSUES.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict) and isinstance(loaded.get("issues"), list):
+            issues = loaded["issues"]
     ranked: list[dict] = []
     ranked_at: str | None = None
     if RANKED.exists():
-        payload = json.loads(RANKED.read_text(encoding="utf-8"))
-        ranked = payload.get("candidates") or []
-        ranked_at = payload.get("ranked_at")
+        try:
+            payload = json.loads(RANKED.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            ranked = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+            ranked_at = payload.get("ranked_at")
     return issues, ranked, ranked_at
 
 

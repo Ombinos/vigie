@@ -13,15 +13,31 @@ def normalized_span(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
+def _entries(doc: object, key: str) -> list:
+    if not isinstance(doc, dict):
+        return []
+    value = doc.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _claims_of(candidate: dict) -> list[dict]:
+    enrich = candidate.get("enrich") if isinstance(candidate.get("enrich"), dict) else {}
+    claims = enrich.get("claims") if isinstance(enrich.get("claims"), list) else []
+    return [c for c in claims if isinstance(c, dict)]
+
+
 def audit_claims(enriched: dict, issues: dict) -> dict:
-    candidates = enriched.get("candidates") or []
-    by_id = {str(c["id"]): c for c in candidates if c.get("id")}
+    candidates = _entries(enriched, "candidates")
+    by_id = {str(c["id"]): c for c in candidates if isinstance(c, dict) and c.get("id")}
     errors: list[dict] = []
     attrs: Counter = Counter()
     claim_count = 0
     speakers = 0
     for candidate in candidates:
-        for claim in (candidate.get("enrich") or {}).get("claims") or []:
+        if not isinstance(candidate, dict):
+            errors.append({"candidate_id": None, "reason": "candidate_not_an_object"})
+            continue
+        for claim in _claims_of(candidate):
             claim_count += 1
             attrs[str(claim.get("attribution") or "unknown")] += 1
             speakers += bool(claim.get("speaker"))
@@ -37,17 +53,21 @@ def audit_claims(enriched: dict, issues: dict) -> dict:
                 reason = "speaker_not_in_declared_source_field"
             if reason:
                 errors.append({"candidate_id": candidate.get("id"), "reason": reason})
-    for issue in issues.get("issues") or []:
-        voices = {t.get("institution_id") for t in issue.get("tensions") or [] if t.get("institution_id")}
+    for issue in _entries(issues, "issues"):
+        if not isinstance(issue, dict):
+            errors.append({"issue_id": None, "reason": "issue_not_an_object"})
+            continue
+        tensions = [t for t in (issue.get("tensions") or []) if isinstance(t, dict)]
+        voices = {t.get("institution_id") for t in tensions if t.get("institution_id")}
         if len(voices) < 2:
             errors.append({"issue_id": issue.get("issue_id"), "reason": "fewer_than_two_institutions"})
-        for tension in issue.get("tensions") or []:
-            for item in tension.get("items") or []:
+        for tension in tensions:
+            for item in [i for i in (tension.get("items") or []) if isinstance(i, dict)]:
                 source = by_id.get(str(item.get("candidate_id")))
                 if source is None:
                     errors.append({"candidate_id": item.get("candidate_id"), "reason": "issue_article_missing_from_snapshot"})
                     continue
-                expected = (source.get("enrich") or {}).get("claims") or []
+                expected = _claims_of(source)
                 for claim in item.get("claims") or []:
                     if claim not in expected:
                         errors.append({"candidate_id": item.get("candidate_id"), "reason": "issue_claim_lost_or_changed_provenance"})
@@ -55,7 +75,7 @@ def audit_claims(enriched: dict, issues: dict) -> dict:
         "method": "extraction-integrity-v1-not-truth-verification",
         "candidate_count": len(candidates),
         "claim_count": claim_count,
-        "candidates_with_claims": sum(bool((c.get("enrich") or {}).get("claims")) for c in candidates),
+        "candidates_with_claims": sum(bool(_claims_of(c)) for c in candidates if isinstance(c, dict)),
         "with_speaker": speakers,
         "attributions": dict(attrs),
         "errors": errors,
@@ -65,11 +85,18 @@ def audit_claims(enriched: dict, issues: dict) -> dict:
 
 
 def main() -> int:
-    enriched = json.loads((ROOT / "data/normalized/latest_enriched.json").read_text(encoding="utf-8"))
-    issues = json.loads((ROOT / "data/issues/latest_issues.json").read_text(encoding="utf-8"))
+    try:
+        enriched = json.loads((ROOT / "data/normalized/latest_enriched.json").read_text(encoding="utf-8"))
+        issues = json.loads((ROOT / "data/issues/latest_issues.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"check_claims: FAIL unreadable store ({type(exc).__name__}: {exc})")
+        return 1
     report = audit_claims(enriched, issues)
-    path = ROOT / "data/normalized/_check_claims.json"
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        path = ROOT / "data/normalized/_check_claims.json"
+        path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"check_claims: WARN report not written ({exc})")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 

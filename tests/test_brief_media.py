@@ -406,6 +406,7 @@ class MediaStaging(unittest.TestCase):
             encoding="utf-8",
         )
         (self.public / "morning.html").write_text("<h1>M</h1>", encoding="utf-8")
+        (self.public / "explorer.html").write_text("<h1>Workbench</h1>", encoding="utf-8")
         (self.public / "favicon.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
         self.media = self.root / "data" / "media" / "brief"
         self.media.mkdir(parents=True)

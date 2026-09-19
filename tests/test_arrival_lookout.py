@@ -1,11 +1,49 @@
 """Arrival Lookout — Phase 0/1: first paint is Approaches, not a dashboard."""
 from __future__ import annotations
 
+import re
 import unittest
 
 import harness  # noqa: F401 — scripts/ on sys.path
 
 import rank_display
+
+
+class MovedPinIntegrity(unittest.TestCase):
+    def test_moved_pin_links_never_dangle_past_the_cap(self) -> None:
+        """The Moved strip is capped at 15; a 16th demoted item must link out,
+        not to a #pin- anchor that no radar row rendered (staging rejects dead
+        in-page anchors, which would block the whole edition)."""
+        ranked = [
+            {
+                "id": f"b{i}",
+                "title": f"Bulletin {i}",
+                "url": f"https://ici.radio-canada.ca/ohdio/premiere/{i}",
+                "source_id": "radio-canada-quebec",
+                "source_name": "Radio-Canada",
+                "nest_role": "primary",
+                "geo": "quebec-city",
+                "rank_score": 0.5 - i * 0.01,
+                "enrich": {"geo": {"geo": "quebec-city"}, "topics": [{"topic": "other"}], "impacts": []},
+            }
+            for i in range(16)
+        ]
+        html = rank_display.render_html(ranked, "2026-09-16T00:00:00+00:00", issues=[])
+        targets = set(re.findall(r'href="#(pin-[^"]+)"', html))
+        ids = set(re.findall(r'id="(pin-[^"]+)"', html))
+        self.assertTrue(targets)
+        self.assertLessEqual(targets, ids)
+
+    def test_issue_counts_are_escaped_in_the_compass(self) -> None:
+        issues = [{
+            "issue_id": "i1",
+            "question": "Que se passe-t-il ?",
+            "scar": "scar",
+            "source_count": "<img src=x onerror=alert(1)>",
+            "tensions": [],
+        }]
+        html = rank_display.render_html([], "2026-09-16T00:00:00+00:00", issues=issues)
+        self.assertNotIn("<img src=x onerror", html)
 
 
 class ApproachBuilders(unittest.TestCase):

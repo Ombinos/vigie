@@ -95,6 +95,19 @@ class EditionMetrics(unittest.TestCase):
         self.assertEqual(doc["edition_count"], 1)
         self.assertEqual(doc["latest"]["edition"], "2026-09-19T10:00:00+00:00")
 
+    def test_same_edition_recompile_does_not_zero_churn(self) -> None:
+        self.compile()
+        new_ids = [f"new{i}" for i in range(5)] + self.ids[5:]
+        write(self.paths["ranked_path"], ranked_doc("2026-09-19T16:00:00+00:00", new_ids))
+        first = self.compile()
+        self.assertEqual(first["latest"]["churn_in"], 5)
+        # Recompiling the same edition must compare against the edition before
+        # it, never against itself (which would zero the churn and falsify it).
+        again = self.compile()
+        self.assertEqual(again["edition_count"], 2)
+        self.assertEqual(again["latest"]["churn_in"], 5)
+        self.assertEqual(again["churn_in_avg"], 5.0)
+
     def test_history_is_capped(self) -> None:
         write(self.paths["out_path"], {"method": cm.METHOD, "history": [
             {"edition": f"e{i}", "top_ids": []} for i in range(cm.HISTORY_CAP)]})
@@ -288,11 +301,19 @@ class Watchdog(unittest.TestCase):
         self.assertEqual(doc["week"], "unknown")
         self.assertIn("(no feed facts yet)", text)
         self.assertIn("unknown", text)
+        self.assertFalse(doc["latest"]["facts"])
+        self.assertNotIn("the machine is healthy", text)
 
     def test_foreign_ledger_methods_are_ignored(self) -> None:
         write(self.ops / "feed_health.json", {"method": "other-v9", "sources": {"z": {"status": "dead"}}})
         doc = self.compile()
-        self.assertEqual(doc["latest"]["attention"], [])
+        attention = doc["latest"]["attention"]
+        # The foreign ledger is never read as fact...
+        self.assertFalse(any("z is dead" in line for line in attention))
+        # ...and with no fact at all the verdict is blindness, never health.
+        self.assertFalse(doc["latest"]["facts"])
+        self.assertTrue(any("blind" in line for line in attention))
+        self.assertNotIn("the machine is healthy", self.md.read_text(encoding="utf-8"))
 
     def test_main_always_exits_zero(self) -> None:
         self.healthy_ledgers()

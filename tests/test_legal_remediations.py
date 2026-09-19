@@ -16,6 +16,7 @@ R6: raw snapshots older than the retention window are pruned; the newest
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import unittest
 import urllib.error
@@ -161,18 +162,34 @@ class IdentityLaw(unittest.TestCase):
 
     def test_transport_stall_marks_the_host_and_retries_under_browser_identity(self) -> None:
         opener = mock.Mock()
-        opener.open.side_effect = [OSError("connection reset"), response(RSS, {})]
+        opener.open.side_effect = [ConnectionResetError("connection reset"), response(RSS, {})]
         body, _ = self.fetch(opener)
         self.assertEqual(body, RSS)
         second = self.requests_of(opener)[1]
         self.assertEqual(second.get_header("User-agent"), ingest_rss.FALLBACK_USER_AGENT)
         policy = json.loads(self.policy.read_text(encoding="utf-8"))
         self.assertEqual(policy["news.example"]["identity"], "browser")
-        self.assertEqual(policy["news.example"]["reason"], "OSError")
+        self.assertEqual(policy["news.example"]["reason"], "ConnectionResetError")
         # the switch is remembered: the next run starts under the browser identity
         self.assertEqual(ingest_rss.choose_user_agent(URL), ingest_rss.FALLBACK_USER_AGENT)
         self.assertEqual(ingest_rss.choose_user_agent("https://other.example/feed"),
                          ingest_rss.USER_AGENT)
+
+    def test_local_dns_failure_is_never_blamed_on_the_origin(self) -> None:
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.URLError(
+            socket.gaierror(-2, "Name or service not known"))
+        with self.assertRaises(urllib.error.URLError):
+            self.fetch(opener)
+        self.assertFalse(self.policy.exists())
+        for req in self.requests_of(opener):
+            self.assertEqual(req.get_header("User-agent"), ingest_rss.USER_AGENT)
+
+    def test_a_stale_marker_is_reprobed_under_the_honest_identity(self) -> None:
+        self.policy.write_text(json.dumps({"news.example": {
+            "identity": "browser", "reason": "TimeoutError",
+            "marked_at": "2025-01-01T00:00:00+00:00"}}), encoding="utf-8")
+        self.assertEqual(ingest_rss.choose_user_agent(URL), ingest_rss.USER_AGENT)
 
     def test_http_refusal_is_respected_and_never_identity_switched(self) -> None:
         opener = mock.Mock()
@@ -182,6 +199,8 @@ class IdentityLaw(unittest.TestCase):
         self.assertFalse(self.policy.exists())
         for req in self.requests_of(opener):
             self.assertEqual(req.get_header("User-agent"), ingest_rss.USER_AGENT)
+        # a refusal is final: it is not retried under the same identity either
+        self.assertEqual(len(self.requests_of(opener)), 1)
 
     def test_guard_rejection_never_identity_switches(self) -> None:
         opener = mock.Mock()
@@ -231,6 +250,25 @@ class Retention(unittest.TestCase):
         only = self.touch("quiet/20260101T000000Z.json")
         self.assertEqual(ingest_rss.prune_raw_snapshots(self.raw, now=self.now), 0)
         self.assertTrue(only.exists())
+
+    def test_an_old_snapshot_pair_is_pruned_only_when_a_newer_pair_exists(self) -> None:
+        old_xml = self.touch("quiet/20260101T000000Z_abcd.xml")
+        old_meta = self.touch("quiet/20260101T000000Z_abcd.json")
+        new_xml = self.touch("quiet/20260918T060000Z_ef01.xml")
+        new_meta = self.touch("quiet/20260918T060000Z_ef01.json")
+        removed = ingest_rss.prune_raw_snapshots(self.raw, now=self.now)
+        self.assertEqual(removed, 2)
+        self.assertFalse(old_xml.exists())
+        self.assertFalse(old_meta.exists())
+        self.assertTrue(new_xml.exists())
+        self.assertTrue(new_meta.exists())
+
+    def test_the_newest_pair_survives_for_a_quiet_source(self) -> None:
+        xml = self.touch("quiet/20260101T000000Z_abcd.xml")
+        meta = self.touch("quiet/20260101T000000Z_abcd.json")
+        self.assertEqual(ingest_rss.prune_raw_snapshots(self.raw, now=self.now), 0)
+        self.assertTrue(xml.exists())
+        self.assertTrue(meta.exists())
 
     def test_infrastructure_files_are_never_pruned(self) -> None:
         cache = self.touch("_http_cache.json")

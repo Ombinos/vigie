@@ -278,14 +278,16 @@ def load_event_history(store_path: Path) -> dict:
     }
 
 
-def update_event_history(history: dict, active: list[dict], collection_ts: str) -> dict:
+def update_event_history(history: dict, present_events: list[dict], collection_ts: str) -> dict:
     """Pure: history advanced by one collection; the input is not mutated.
 
     One collection is one distinct fetched_at snapshot, so offline reuse never
     inflates counts and history only moves forward: a timestamp at or before
-    the last update returns history unchanged. An event absent from this
-    collection gains collections_missed — an absence from the feed, never a
-    claim that the works ended (removed ≠ ended).
+    the last update returns history unchanged. `present_events` is every event
+    the feed still published this collection - including one whose status is
+    ended or cancelled. An event absent from that set gains collections_missed:
+    an absence from the feed, never a claim that the works ended (removed ≠
+    ended), and never a "miss" for a work the publisher still lists as finished.
     """
     collection_ts = str(collection_ts or "").strip()
     if not collection_ts:
@@ -300,7 +302,7 @@ def update_event_history(history: dict, active: list[dict], collection_ts: str) 
         if isinstance(v, dict)
     }
     present: set[str] = set()
-    for event in active or []:
+    for event in present_events or []:
         eid = str((event or {}).get("event_id") or "").strip()
         if not eid:
             continue
@@ -375,7 +377,9 @@ def snapshot_fetched_at(snapshot: Path) -> datetime | None:
     meta = snapshot.with_suffix(".json")
     if meta.exists():
         try:
-            return _parse_iso(json.loads(meta.read_text(encoding="utf-8")).get("fetched_at"))
+            doc = json.loads(meta.read_text(encoding="utf-8"))
+            if isinstance(doc, dict):
+                return _parse_iso(doc.get("fetched_at"))
         except (OSError, ValueError):
             pass
     return None
@@ -404,25 +408,39 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
             if snapshot is None:
                 print(f"  {source_id}: no raw snapshot to reuse offline; keeping previous store")
                 return {"ok": False, "reason": "no_snapshot"}
-            raw = snapshot.read_bytes()
+            try:
+                raw = snapshot.read_bytes()
+            except OSError as exc:
+                print(f"  FAIL {source_id}: unreadable snapshot ({exc}); keeping previous store")
+                return {"ok": False, "reason": "snapshot_unreadable"}
             fetched_at = snapshot_fetched_at(snapshot) or now
             print(f"  {source_id}: reusing {snapshot.name} (fetched {fetched_at.isoformat()})")
         else:
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                print(f"  FAIL {source_id}: unwritable raw directory ({exc}); keeping previous store")
+                return {"ok": False, "reason": "raw_dir_unwritable"}
             stamp = now.strftime("%Y%m%dT%H%M%SZ")
             try:
                 raw, content_type = fetch(src["url"])
             except Exception as exc:
                 error = {"ok": False, "source_id": source_id, "url": src.get("url"),
                          "error": f"{type(exc).__name__}: {exc}", "fetched_at": now.isoformat()}
-                (dest_dir / f"{stamp}_error.json").write_text(
-                    json.dumps(error, ensure_ascii=False, indent=2), encoding="utf-8")
+                try:
+                    (dest_dir / f"{stamp}_error.json").write_text(
+                        json.dumps(error, ensure_ascii=False, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
                 print(f"  FAIL {source_id}: {error['error']} — keeping previous store")
                 return {"ok": False, "reason": "fetch_failed"}
             fetched_at = now
             digest = sha256_hex(raw)
             snapshot = dest_dir / f"{stamp}_{digest[:12]}.geojson"
-            snapshot.write_bytes(raw)
+            try:
+                snapshot.write_bytes(raw)
+            except OSError as exc:
+                print(f"  WARN {source_id}: snapshot not archived ({exc}); continuing from memory")
         parse_error = None
         features: list = []
         try:
@@ -430,7 +448,10 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
             features = doc.get("features") if isinstance(doc, dict) else None
             if not isinstance(features, list):
                 raise ValueError("no features array in GeoJSON document")
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
+            # A hostile or corrupt document can be deeply nested; json.loads
+            # then raises RecursionError, which is not a ValueError. Either way
+            # the feed is diagnosed, never fatal.
             parse_error = f"{type(exc).__name__}: {exc}"
         if not offline:
             meta = {
@@ -443,8 +464,11 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
                 if snapshot.is_relative_to(raw_dir.parent.parent) else str(snapshot),
                 "feature_count": len(features), "parse_error": parse_error,
             }
-            snapshot.with_suffix(".json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            try:
+                snapshot.with_suffix(".json").write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError as exc:
+                print(f"  WARN {source_id}: meta not archived ({exc}); continuing")
         if parse_error:
             print(f"  FAIL {source_id}: {parse_error} — keeping previous store")
             return {"ok": False, "reason": "parse_failed"}
@@ -474,11 +498,17 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
     }
     diff = diff_events(active, previous, now=store_fetched_at, ended=ended_statuses)
     history = update_event_history(
-        load_event_history(store_path), active, store_fetched_at.isoformat()
+        load_event_history(store_path), all_events, store_fetched_at.isoformat()
     )
     store = build_store(sources[0], active, counts, diff, store_fetched_at, history)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
-    store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = store_path.with_name(store_path.name + ".tmp")
+        tmp.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(store_path)
+    except OSError as exc:
+        print(f"  FAIL store write ({type(exc).__name__}: {exc}); keeping previous store")
+        return {"ok": False, "reason": "store_write_failed"}
     return {"ok": True, "store": store, "store_path": store_path}
 
 

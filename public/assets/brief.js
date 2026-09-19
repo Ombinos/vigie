@@ -3,8 +3,14 @@
   'use strict';
   const $ = (selector) => document.querySelector(selector);
   const all = (selector) => [...document.querySelectorAll(selector)];
+  const on = (el, event, fn) => { if (el && el.addEventListener) el.addEventListener(event, fn); };
   const KEY = 'vigie.resident.v1';
-  const fold = (text) => String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  // Folding must match resident_brief.folded(): ligatures and typographic
+  // apostrophes are mapped before diacritics are stripped, or searching
+  // "oeuvre" would never match a stored "œuvre".
+  const LIGATURES = { 'œ': 'oe', 'Œ': 'oe', 'æ': 'ae', 'Æ': 'ae', '’': "'", '‘': "'", '`': "'", '´': "'" };
+  const fold = (text) => String(text || '').replace(/[œŒæÆ’‘`´]/g, ch => LIGATURES[ch])
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   const rows = all('.story');
   // Per-row refs and parsed facets are cached once: render() runs on every
   // interaction over 300+ rows and up to 1200 saved marks, so it must stay
@@ -50,6 +56,7 @@
   const freshnessEl = $('#freshness-label');
   const freshness = () => {
     const label = freshnessEl;
+    if (!label) return;
     const date = Date.parse(label.dataset.fetched);
     const age = Date.now() - date;
     const stale = !Number.isFinite(date) || age > 6 * 3600 * 1000 || age < -300000;
@@ -81,7 +88,9 @@
       const saved = savedSet.has(card.id);
       card.saveBtn.setAttribute('aria-pressed', String(saved));
       card.saveBtn.textContent = saved ? 'Gardé ✓' : 'Garder ＋';
-      card.saveBtn.setAttribute('aria-label', (saved ? 'Retirer : ' : 'Garder : ') + card.title);
+      // Keep the visible label inside the accessible name (WCAG 2.5.3): a
+      // voice-control user who says "Gardé" must be able to target it.
+      card.saveBtn.setAttribute('aria-label', (saved ? 'Gardé ✓ — retirer : ' : 'Garder : ') + card.title);
     });
     viewBtns.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === view)));
     topicBtns.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.topic === topic)));
@@ -99,34 +108,44 @@
     if (view === 'new' && state.seen === null) visitStatusEl.textContent = 'Créez d’abord un repère avec « Mémoriser ce point de lecture ».';
   }
   function reset() { topic = 'all'; view = 'brief'; limit = 6; searchEl.value = ''; scopeEl.value = 'local'; areaEl.value = 'all'; render(); }
-  viewBtns.forEach(b => b.addEventListener('click', () => { view = b.dataset.view; limit = 6; if (view === 'saved' || view === 'new') { scopeEl.value = 'all'; areaEl.value = 'all'; searchEl.value = ''; topic = 'all'; } else { scopeEl.value = 'local'; } render(); }));
-  topicBtns.forEach(b => b.addEventListener('click', () => { topic = b.dataset.topic; limit = 6; render(); }));
+  viewBtns.forEach(b => on(b, 'click', () => { view = b.dataset.view; limit = 6; if (view === 'saved' || view === 'new') { scopeEl.value = 'all'; areaEl.value = 'all'; searchEl.value = ''; topic = 'all'; } else { scopeEl.value = 'local'; } render(); }));
+  topicBtns.forEach(b => on(b, 'click', () => { topic = b.dataset.topic; limit = 6; render(); }));
   // Debounced: filtering every row per keystroke wastes battery on phones;
   // 150 ms still feels instant and the final render is always correct.
-  searchEl.addEventListener('input', () => { limit = 6; clearTimeout(searchTimer); searchTimer = setTimeout(render, 150); });
-  [scopeEl, areaEl].forEach(el => el.addEventListener('change', () => { limit = 6; render(); }));
-  ['#reset-filters', '#empty-reset'].forEach(s => $(s).addEventListener('click', reset));
-  showMoreEl.addEventListener('click', () => { limit += 6; render(); });
-  all('[data-save]').forEach(b => b.addEventListener('click', () => {
+  on(searchEl, 'input', () => { limit = 6; clearTimeout(searchTimer); searchTimer = setTimeout(render, 150); });
+  [scopeEl, areaEl].forEach(el => on(el, 'change', () => { limit = 6; render(); }));
+  ['#reset-filters', '#empty-reset'].forEach(s => on($(s), 'click', reset));
+  on(showMoreEl, 'click', () => { limit += 6; render(); });
+  all('[data-save]').forEach(b => on(b, 'click', () => {
     const id = b.dataset.save;
-    if (savedSet.has(id)) state.saved = state.saved.filter(x => x !== id);
+    const wasSaved = savedSet.has(id);
+    if (wasSaved) state.saved = state.saved.filter(x => x !== id);
     else { if (state.saved.length >= 1200) { toast('La limite de 1 200 repères est atteinte. Retirez-en pour en garder de nouveaux.'); return; } state.saved.push(id); }
     syncSets(); persist(); render();
+    // Un-saving inside the saved view hides the row under the focused button;
+    // move focus to a stable status line instead of dropping it to <body>.
+    if (view === 'saved' && wasSaved && document.activeElement === document.body) {
+      visitStatusEl.setAttribute('tabindex', '-1');
+      visitStatusEl.focus();
+    }
   }));
-  $('#remember').addEventListener('click', () => {
+  on($('#remember'), 'click', () => {
     state.seen = cards.map(c => c.id).slice(0, 1200); state.visited = new Date().toISOString();
     syncSets();
     const stored = persist(); render(); if (stored) toast('Point de lecture mémorisé sur cet appareil.');
   });
-  $('#clear-local').addEventListener('click', () => {
+  on($('#clear-local'), 'click', () => {
     let cleared = true;
     try { [KEY, 'vigie_facets_v1', 'vigie_visit_v1'].forEach(k => localStorage.removeItem(k)); } catch { cleared = false; }
     state = { saved: [], seen: null, visited: null }; syncSets(); reset();
-    $('#privacy-status').textContent = cleared ? 'Vos repères Vigie ont été effacés de cet appareil.' : 'L’accès au stockage est bloqué. Les repères de cette visite ont été effacés.';
+    const ps = $('#privacy-status');
+    if (ps) ps.textContent = cleared ? 'Vos repères Vigie ont été effacés de cet appareil.' : 'L’accès au stockage est bloqué. Les repères de cette visite ont été effacés.';
   });
   // Hash links to disclosures must open the disclosure, including direct URLs.
-  const revealHash = () => { if (location.hash === '#couverture') $('#couverture').open = true; };
+  const revealHash = () => { if (location.hash === '#couverture' && $('#couverture')) $('#couverture').open = true; };
   window.addEventListener('hashchange', revealHash); revealHash();
-  // Attach handlers first, then reveal controls; a failure leaves readable HTML.
-  document.documentElement.classList.add('js'); render();
+  // Reveal controls first, then render: a missing shell element in a future
+  // edition must leave the static article reading intact, never a dead page.
+  document.documentElement.classList.add('js');
+  try { render(); } catch { /* static reading remains intact */ }
 })();

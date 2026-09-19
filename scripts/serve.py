@@ -43,6 +43,21 @@ class VigieHandler(SimpleHTTPRequestHandler):
         self.send_error(404, "Not found")
         return None
 
+    def _open_sized(self, target: Path, content_type: str):
+        """Open a file and announce its size; a race or permission error is a
+        404, never an unhandled traceback in the handler thread."""
+        try:
+            file = target.open("rb")
+            size = target.stat().st_size
+        except OSError:
+            self.send_error(404, "Not found")
+            return None
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        return file
+
     def send_head(self):
         """GET and HEAD share the same route and filesystem checks."""
         path = unquote(urlsplit(self.path).path)
@@ -54,12 +69,7 @@ class VigieHandler(SimpleHTTPRequestHandler):
             if target.is_symlink() or not target.is_file() or target.resolve().parent != ROOT.resolve():
                 self.send_error(404, "Method file missing")
                 return None
-            file = target.open("rb")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(target.stat().st_size))
-            self.end_headers()
-            return file
+            return self._open_sized(target, "text/plain; charset=utf-8")
         if self.media_root is not None and path.startswith("/media/"):
             name = path[len("/media/"):]
             target = self.media_root / name
@@ -68,12 +78,8 @@ class VigieHandler(SimpleHTTPRequestHandler):
                     or target.resolve().parent != self.media_root.resolve()):
                 self.send_error(404, "Not found")
                 return None
-            file = target.open("rb")
-            self.send_response(200)
-            self.send_header("Content-Type", MEDIA_TYPES.get(target.suffix.lower(), "application/octet-stream"))
-            self.send_header("Content-Length", str(target.stat().st_size))
-            self.end_headers()
-            return file
+            return self._open_sized(
+                target, MEDIA_TYPES.get(target.suffix.lower(), "application/octet-stream"))
         target = Path(self.translate_path(self.path))
         if not target.resolve().is_relative_to(self.public_root):
             self.send_error(404, "Not found")

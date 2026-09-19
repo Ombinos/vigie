@@ -32,6 +32,7 @@ class StaticRelease(unittest.TestCase):
             (self.root / name).write_text("Public method", encoding="utf-8")
         (self.public / "index.html").write_text('<a href="/morning.html#brief">Brief</a><link href="/favicon.svg"><a href="/VISION.md">Method</a>', encoding="utf-8")
         (self.public / "morning.html").write_text('<h1 id="brief">Brief</h1>', encoding="utf-8")
+        (self.public / "explorer.html").write_text('<h1>Workbench</h1>', encoding="utf-8")
         (self.public / "favicon.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
 
     def test_nested_assets_stale_removal_and_exact_manifest(self):

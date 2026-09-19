@@ -21,6 +21,7 @@ from collections import Counter
 from pathlib import Path
 
 import ingest_wzdx
+import store_io
 from edge_atlas import street_key
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,23 +249,27 @@ def _load_json(path: Path) -> object:
 
 
 def main(argv: list[str] | None = None) -> int:
-    rw = _load_json(ROADWORKS)
-    if not isinstance(rw, dict) or rw.get("method") != ROADWORKS_METHOD:
-        verdict = empty_verdict(
-            "Aucune collecte officielle exploitable (données absentes, corrompues "
-            "ou d'une autre méthode) : aucune anomalie mesurée."
-        )
-    else:
-        verdict = compile_verdict(rw)
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(verdict, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
-        shown = OUT_PATH.relative_to(ROOT)
-    except ValueError:
-        shown = OUT_PATH
-    print(f"anomalies: {verdict['anomaly_count']} measured "
-          f"({len(verdict['anomalies'])} in verdict) -> {shown}")
-    # Always 0: a missing official feed must never block the edition.
+        rw = _load_json(ROADWORKS)
+        if not isinstance(rw, dict) or rw.get("method") != ROADWORKS_METHOD:
+            verdict = empty_verdict(
+                "Aucune collecte officielle exploitable (données absentes, corrompues "
+                "ou d'une autre méthode) : aucune anomalie mesurée."
+            )
+        else:
+            verdict = compile_verdict(rw)
+        store_io.write_json_atomic(OUT_PATH, verdict)
+        try:
+            shown = OUT_PATH.relative_to(ROOT)
+        except ValueError:
+            shown = OUT_PATH
+        print(f"anomalies: {verdict['anomaly_count']} measured "
+              f"({len(verdict['anomalies'])} in verdict) -> {shown}")
+    except (OSError, ValueError) as exc:
+        # Always 0: a missing official feed or an unwritable store must never
+        # block the edition.
+        print(f"anomalies: FAIL {type(exc).__name__}: {exc} - keeping previous verdict")
+        return 0
     return 0
 
 
