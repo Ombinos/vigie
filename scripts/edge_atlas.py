@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import re
 import sys
 import unicodedata
@@ -42,6 +43,8 @@ EVENT_IDS_CAP = 12        # evidence ids kept per street; counts stay exact
 MATCHED_ISSUES_CAP = 5    # dossiers kept per street; the index stays exact
 ISSUE_STREETS_CAP = 5     # streets kept per dossier
 PHRASE_VARIANTS_CAP = 8   # match phrases per street
+PHRASE_TOKEN_CAP = 6      # tokens beyond this skip variant expansion
+PHRASE_PRODUCT_CAP = 64   # cartesian budget before falling back to the base form
 PHRASE_MIN_LEN = 6        # shorter phrases are too ambiguous to match literally
 TEXT_CAP = 6000           # dossier text scanned per issue
 CENTROID_PRECISION = 5    # ~1 m; keeps the store deterministic
@@ -176,10 +179,14 @@ def phrase_variants(raw: object) -> list[str]:
         canon_aligned = canon_aligned[:-1]
         raw_aligned = raw_aligned[:-1]
     per_token = [_token_variants(rt, ct) for rt, ct in zip(raw_aligned, canon_aligned)]
-    combos = [
-        " ".join(combo)
-        for combo in itertools.product(*per_token)
-    ]
+    # Bound the cartesian product before materializing it: a hostile or absurd
+    # multi-token road name would otherwise form 4^N phrases (16 tokens ~ hours
+    # and gigabytes). The base canonical phrase is always kept.
+    budget = math.prod(len(v) for v in per_token)
+    if len(per_token) > PHRASE_TOKEN_CAP or budget > PHRASE_PRODUCT_CAP:
+        combos = [" ".join(canon_aligned)]
+    else:
+        combos = [" ".join(combo) for combo in itertools.product(*per_token)]
     if direction:
         combos += [f"{combo} {direction}" for combo in combos]
     phrases = sorted(
@@ -230,7 +237,10 @@ def load_geometry(raw_dir: Path, source_id: object) -> dict[str, list[tuple[floa
         return {}
     try:
         doc = json.loads(snapshot.read_bytes())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # Deeply nested JSON raises RecursionError, not ValueError. The raw
+        # snapshot is archived before parsing, so a hostile roadworks document
+        # must degrade to "no geometry" instead of killing the whole chain.
         return {}
     features = doc.get("features") if isinstance(doc, dict) else None
     geometry: dict[str, list[tuple[float, float]]] = {}
@@ -366,7 +376,7 @@ def empty_atlas(note: str) -> dict:
 def _load_json(path: Path) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 

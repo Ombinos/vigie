@@ -40,3 +40,25 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
 
 def write_json_atomic(path: Path, doc, *, indent: int = 2) -> None:
     write_text_atomic(path, json.dumps(doc, ensure_ascii=False, indent=indent))
+
+
+def write_bytes_dedup(path: Path, data: bytes, previous: Path | None = None) -> None:
+    """Write a per-run snapshot, hard-linking an identical previous one.
+
+    Append-only stores keep one file per run so offline rebuilds and edition
+    diffs can address a stamp; an unchanged feed (a 304, or identical bytes)
+    would otherwise copy the same body every run. A hard link keeps the new
+    name and every reader intact at zero extra disk. Linking is best-effort:
+    if the filesystem refuses (non-NTFS, cross-volume, permissions) the bytes
+    are written normally, never an error.
+    """
+    path = Path(path)
+    if previous is not None:
+        previous = Path(previous)
+        if previous.exists():
+            try:
+                os.link(previous, path)
+                return
+            except OSError:
+                pass
+    path.write_bytes(data)

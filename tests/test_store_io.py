@@ -62,5 +62,36 @@ class AtomicWrite(unittest.TestCase):
         self.assertEqual(list(self.dir.glob("*.tmp")), [])
 
 
+class DedupWrite(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def test_identical_body_is_hard_linked_not_copied(self) -> None:
+        previous = self.dir / "20260101T000000Z_abcd1234abcd.xml"
+        previous.write_bytes(b"<rss>same</rss>")
+        target = self.dir / "20260102T000000Z_abcd1234abcd.xml"
+        store_io.write_bytes_dedup(target, b"<rss>same</rss>", previous)
+        self.assertEqual(target.read_bytes(), b"<rss>same</rss>")
+        try:
+            self.assertEqual(previous.stat().st_ino, target.stat().st_ino)
+        except (OSError, AttributeError):
+            pass  # filesystem without inode/link support: content is what matters
+
+    def test_linking_failure_falls_back_to_a_normal_write(self) -> None:
+        previous = self.dir / "prev.xml"
+        previous.write_bytes(b"same")
+        target = self.dir / "new.xml"
+        with mock.patch.object(store_io.os, "link", side_effect=OSError("cross-volume")):
+            store_io.write_bytes_dedup(target, b"same", previous)
+        self.assertEqual(target.read_bytes(), b"same")
+
+    def test_without_previous_it_writes_plainly(self) -> None:
+        target = self.dir / "only.xml"
+        store_io.write_bytes_dedup(target, b"body")
+        self.assertEqual(target.read_bytes(), b"body")
+
+
 if __name__ == "__main__":
     unittest.main()

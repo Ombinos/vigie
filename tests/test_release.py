@@ -229,5 +229,98 @@ class ReleaseGuards(unittest.TestCase):
         verify.claims_gate()
 
 
+class StageSwapHardening(unittest.TestCase):
+    """The Windows sharing violation and the concurrent-stager race.
+
+    A scheduled refresh and a manual verify can rename deploy/public at the
+    same instant; a held handle makes the rename fail with WinError 32. These
+    tests pin the retry, the lock, and the graceful handling of a release that
+    a concurrent stager moved away.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_transient_sharing_error_is_retried_then_succeeds(self):
+        calls = {"n": 0}
+        real = Path.rename
+
+        def flaky(path, target):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                exc = OSError(32, "in use")
+                exc.winerror = 32
+                raise exc
+            return real(path, target)
+
+        source = self.root / "a"
+        source.mkdir()
+        target = self.root / "b"
+        with patch.object(Path, "rename", flaky), patch.object(stage_public.time, "sleep"):
+            stage_public._rename_retry(source, target)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(calls["n"], 3)
+
+    def test_non_transient_rename_error_propagates_at_once(self):
+        calls = {"n": 0}
+
+        def broken(path, target):
+            calls["n"] += 1
+            raise OSError("disk on fire")
+
+        with patch.object(Path, "rename", broken), self.assertRaisesRegex(OSError, "disk on fire"):
+            stage_public._rename_retry(self.root / "a", self.root / "b")
+        self.assertEqual(calls["n"], 1)
+
+    def test_live_concurrent_stager_is_refused(self):
+        parent = self.root / "deploy"
+        parent.mkdir(parents=True)
+        lock = parent / stage_public.STAGE_LOCK_NAME
+        lock.write_text("other", encoding="utf-8")
+        with patch.object(stage_public, "STAGE_LOCK_WAIT_SECONDS", 0.0), \
+                self.assertRaisesRegex(RuntimeError, "Another staging run"):
+            with stage_public._stage_lock(parent):
+                pass
+        self.assertTrue(lock.exists())  # the loser must not steal a live lock
+
+    def test_stale_stage_lock_is_reclaimed(self):
+        parent = self.root / "deploy"
+        parent.mkdir(parents=True)
+        lock = parent / stage_public.STAGE_LOCK_NAME
+        lock.write_text("dead", encoding="utf-8")
+        old = time.time() - stage_public.STAGE_LOCK_STALE_SECONDS - 60
+        os.utime(lock, (old, old))
+        with stage_public._stage_lock(parent):
+            pass
+        self.assertFalse(lock.exists())
+
+    def test_release_moved_by_a_concurrent_stager_is_not_fatal(self):
+        public = self.root / "public"
+        public.mkdir()
+        output = self.root / "deploy" / "public"
+        for name in stage_public.METHODS:
+            (self.root / name).write_text("Public method", encoding="utf-8")
+        (public / "index.html").write_text("Brief", encoding="utf-8")
+        (public / "morning.html").write_text("Morning", encoding="utf-8")
+        (public / "explorer.html").write_text("Workbench", encoding="utf-8")
+        (public / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+        stage_public.stage(self.root, output)
+        real = Path.rename
+        moved = self.root / "moved-away"
+
+        def vanish_previous(path, target):
+            if Path(path) == output:
+                real(path, moved)  # another stager really did take it
+                raise FileNotFoundError("moved by another stager")
+            return real(path, target)
+
+        with patch.object(Path, "rename", vanish_previous):
+            manifest = stage_public.stage(self.root, output)
+        self.assertEqual((output / "index.html").read_text(encoding="utf-8"), "Brief")
+        self.assertIn("index.html", manifest["files"])
+
+
 if __name__ == "__main__":
     unittest.main()

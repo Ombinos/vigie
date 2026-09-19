@@ -104,8 +104,14 @@ def fetch_html(url: str, *, retries: int = 2, diag: dict | None = None) -> str |
 
     try:
         public_http_url(url, resolve=True)
-    except (ValueError, OSError) as exc:
-        fail("article_guard_rejected", f"{type(exc).__name__}: {exc}")
+    except ValueError as exc:
+        fail("article_guard_rejected", f"ValueError: {exc}")
+        return None
+    except OSError as exc:
+        # A transient resolver failure (gaierror/SERVFAIL) is not a policy
+        # rejection: classify it as network so it is retried, never marked
+        # permanent and blinded forever.
+        fail("article_network_error", f"{type(exc).__name__}: {exc}")
         return None
     host = urlparse(url).hostname or ""
     ua = choose_user_agent(url)

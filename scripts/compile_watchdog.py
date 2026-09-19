@@ -38,6 +38,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import store_io
+
 ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / "data" / "ops"
 DATA = ROOT / "data"
@@ -269,11 +271,7 @@ def compile_watchdog(ops_dir: Path | None = None, data_dir: Path | None = None,
     md = _render_markdown(snapshot, feed_sources, media_latest, weeks)
     for path, payload in ((out_json, json.dumps(out_doc, ensure_ascii=False, indent=2)), (out_md, md)):
         try:
-            path = Path(path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            part = path.with_name(path.name + ".tmp")
-            part.write_text(payload, encoding="utf-8")
-            part.replace(path)
+            store_io.write_text_atomic(Path(path), payload)
         except OSError:
             pass
     return out_doc

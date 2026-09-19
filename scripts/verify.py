@@ -158,6 +158,19 @@ def guard_offline_rebuild() -> None:
         raise RuntimeError("--rebuild produced an empty edition; refusing to stage")
 
 
+def guard_nonempty_edition() -> None:
+    """Refuse to stage an empty edition on the online path too.
+
+    `guard_offline_rebuild` protects `--rebuild`; without this, one surviving
+    source that yields zero items (all others failed/stale) would stage an
+    empty brief over a good production edition. Keeping the previous site is
+    the honest outcome."""
+    if _candidate_count() == 0:
+        raise RuntimeError(
+            "refusing to stage an empty edition (0 candidates); the previous "
+            "production site stays up")
+
+
 def claims_gate() -> None:
     """Extraction provenance is a release gate, not a dev script: an excerpt
     that is not contained in its declared source field, or a claim mutated
@@ -194,6 +207,7 @@ def main() -> int:
         claims_gate()
         syntax_checks(include_pages=not args.code_only)
         if not args.code_only:
+            guard_nonempty_edition()
             manifest = stage_public.stage()
             smoke_site(stage_public.OUT, manifest)
     except (OSError, ValueError, SyntaxError, RuntimeError, subprocess.CalledProcessError) as exc:

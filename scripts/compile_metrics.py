@@ -27,6 +27,8 @@ import json
 import sys
 from pathlib import Path
 
+import store_io
+
 ROOT = Path(__file__).resolve().parents[1]
 RANKED = ROOT / "data" / "normalized" / "latest_ranked.json"
 ISSUES = ROOT / "data" / "issues" / "latest_issues.json"
@@ -186,10 +188,7 @@ def compile_metrics(ranked_path: Path | None = None, issues_path: Path | None = 
         "history": history,
     }
     try:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        part = out_path.with_name(out_path.name + ".tmp")
-        part.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-        part.replace(out_path)
+        store_io.write_json_atomic(out_path, doc)
     except OSError:
         pass
     return doc

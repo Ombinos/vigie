@@ -47,32 +47,43 @@ def _entry(issue: dict, change: str) -> dict:
 
 
 def _latest_pub(issue: dict) -> str:
-    value = (issue.get("evidence") or {}).get("publication_latest")
+    evidence = issue.get("evidence")
+    value = evidence.get("publication_latest") if isinstance(evidence, dict) else None
     return str(value) if isinstance(value, str) else ""
 
 
-def _as_int(value: object) -> int:
+def _count(value: object) -> int | None:
+    """An int count, or None when absent/unusable.
+
+    A missing count on the previous edition must never be coerced to zero:
+    that would report the entire current dossier as growth.
+    """
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        return int(value or 0)
+        return int(value)
     except (TypeError, ValueError):
-        return 0
+        return None
 
 
 def _development(current: dict, previous: dict) -> dict:
     """Observable additive growth on a dossier present in both editions.
 
-    Empty when nothing grew. Shrinking is not "development"; the ledger never
-    inflates a story. Only counts and publication recency that are already in
-    the issue store are used - nothing is inferred or fetched.
+    Empty when nothing grew or when a count is missing on either side.
+    Shrinking is not "development"; the ledger never inflates a story. Only
+    counts and publication recency already in the issue store are used -
+    nothing is inferred or fetched.
     """
     delta: dict = {}
-    items = _as_int(current.get("item_count")) - _as_int(previous.get("item_count"))
-    if items > 0:
-        delta["items_added"] = items
-    voices = _as_int(current.get("source_count")) - _as_int(previous.get("source_count"))
-    if voices > 0:
-        delta["voices_added"] = voices
-    if _as_int(current.get("official_voice_count")) > _as_int(previous.get("official_voice_count")):
+    cur_items, prev_items = _count(current.get("item_count")), _count(previous.get("item_count"))
+    if cur_items is not None and prev_items is not None and cur_items > prev_items:
+        delta["items_added"] = cur_items - prev_items
+    cur_voices, prev_voices = _count(current.get("source_count")), _count(previous.get("source_count"))
+    if cur_voices is not None and prev_voices is not None and cur_voices > prev_voices:
+        delta["voices_added"] = cur_voices - prev_voices
+    cur_off, prev_off = (_count(current.get("official_voice_count")),
+                         _count(previous.get("official_voice_count")))
+    if cur_off is not None and prev_off is not None and cur_off > prev_off:
         delta["official_voice_joined"] = True
     cur_pub, prev_pub = _latest_pub(current), _latest_pub(previous)
     # Same-format UTC ISO strings sort lexicographically = chronologically.

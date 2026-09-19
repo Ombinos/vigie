@@ -196,6 +196,7 @@ def plain_text(raw: str | None, limit: int) -> str | None:
         return None
     parser = _PlainText()
     parser.feed(raw)
+    parser.close()  # flush a trailing "&" / incomplete charref, or it is lost
     value = " ".join("".join(parser.parts).split())
     return (value[:limit] + "…" if len(value) > limit else value) or None
 

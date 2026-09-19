@@ -70,8 +70,11 @@ def esc(value: object) -> str:
 
 
 def plain(value: object) -> str:
-    text = sanitize(html.unescape(str(value or "")))
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", text)).strip()
+    # Strip real markup first, then decode entities, then strip display-spoofing
+    # controls (numeric entities can decode to bidi marks). A literal "<" that is
+    # not markup - "5 < 6 > 7 M$" - must survive verbatim instead of being eaten.
+    raw = re.sub(r"</?[a-zA-Z][^>]*>", " ", str(value or ""))
+    return re.sub(r"\s+", " ", sanitize(html.unescape(raw))).strip()
 
 
 # Folding law: ligatures and typographic apostrophes are mapped before the
@@ -550,17 +553,25 @@ DOSSIER_EDGE_CAP = 2
 
 
 def valid_anomalies(doc: object) -> list[dict]:
-    """Verified verdict rows. The method guard mirrors compile_anomalies."""
+    """Verified verdict rows (uncapped). The method guard mirrors compile_anomalies;
+    the display cap and its honest "+ N autres" note are applied at render time."""
     if not isinstance(doc, dict) or doc.get("method") != ANOMALIES_METHOD:
         return []
     rows = doc.get("anomalies")
     if not isinstance(rows, list):
         return []
-    out = [
+    return [
         row for row in rows
         if isinstance(row, dict) and str(row.get("claim") or "").strip()
     ]
-    return out[:ANOMALY_DISPLAY_CAP]
+
+
+def anomaly_total(doc: object, rows: list[dict]) -> int:
+    """Exact measured count when the verdict carries one, never below what we render."""
+    count = doc.get("anomaly_count") if isinstance(doc, dict) else None
+    if isinstance(count, int) and not isinstance(count, bool):
+        return max(count, len(rows))
+    return len(rows)
 
 
 def valid_edges(doc: object) -> tuple[dict, dict]:
@@ -578,16 +589,19 @@ def valid_edges(doc: object) -> tuple[dict, dict]:
     return streets, issues
 
 
-def anomalies_html(rows: list[dict]) -> str:
+def anomalies_html(rows: list[dict], total: int | None = None) -> str:
     """Structural reading of the official collection — measured facts only.
 
     Fixed-threshold rules published in anomalies.md; no prediction, no
-    importance judgment, no alert chrome. Empty verdict, empty HTML.
+    importance judgment, no alert chrome. Empty verdict, empty HTML. When the
+    verdict measured more rows than the display cap, the remainder is announced
+    exactly like every other capped section — never silently dropped.
     """
     if not rows:
         return ""
+    shown = rows[:ANOMALY_DISPLAY_CAP]
     items = []
-    for row in rows:
+    for row in shown:
         evidence = row.get("evidence_event_ids")
         n = len(evidence) if isinstance(evidence, list) else 0
         cited = (
@@ -598,11 +612,19 @@ def anomalies_html(rows: list[dict]) -> str:
             f'<li class="rw-anomaly"><span class="rw-tag rw-t-anom">{esc(row.get("rule_label") or "Anomalie")}</span>'
             f'<span class="rw-anomaly-claim">{esc(row.get("claim"))}</span>{cited}</li>'
         )
+    hidden = max(0, (total if isinstance(total, int) else len(rows)) - len(shown))
+    more = (
+        f'<p class="fine">+ {hidden} autre anomalie mesurée dans cette collecte.</p>'
+        if hidden == 1 else
+        f'<p class="fine">+ {hidden} autres anomalies mesurées dans cette collecte.</p>'
+        if hidden > 1 else ""
+    )
     return (
         '<div class="rw-anomalies" id="anomalies">'
         '<p class="eyebrow">LECTURE STRUCTURELLE</p>'
         '<h3>Ce qui sort de l’ordinaire dans cette collecte.</h3>'
         f'<ul class="rw-anomaly-list">{"".join(items)}</ul>'
+        f"{more}"
         '<p class="fine">Règles à seuils fixes, publiées dans anomalies.md. Une anomalie '
         'est un fait de collecte mesuré — pas une prédiction, pas un jugement '
         'd’importance.</p></div>'
@@ -790,7 +812,8 @@ def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = N
         else {}
     )
     edge_streets, _ = valid_edges(edges)
-    beacon = anomalies_html(valid_anomalies(anomalies))
+    anomaly_rows = valid_anomalies(anomalies)
+    beacon = anomalies_html(anomaly_rows, total=anomaly_total(anomalies, anomaly_rows))
     cards = "".join(
         _rw_card(e, new_ids, changed_by_id, has_previous, history, edge_streets)
         for e in ordered[:RW_DISPLAY_CAP]
@@ -916,7 +939,7 @@ def article_html(item: dict, index: int, related: list[dict], media: dict | None
         place_reason = "Ce document provient d’une source officielle locale."
     # The search index carries exactly what the reader sees (title + displayed
     # excerpt), never the fuller internal summary (LEGAL_RISK.md R4).
-    search_text = esc(folded(item['title'] + ' ' + excerpt_base + ' ' + str(item.get('source_name', ''))))
+    search_text = esc(folded(item['title'] + ' ' + excerpt_base + ' ' + str(item.get('source_name') or '')))
     return f'''<article class="story" id="article-{esc(item['uid'])}" data-id="{esc(item['uid'])}" data-geo="{esc(item['geo'])}" data-topics="{esc(' '.join(item['topics']))}" data-areas="{esc(' '.join(item['areas']))}" data-search="{search_text}" data-published="{esc(item['published'])}">
       <div class="story-number" aria-hidden="true">{index:02}</div><div class="story-body">
       {media_html}<div class="story-kicker"><span>{esc(topic)}</span><span>{geo}</span>{kind}<span class="new-label" hidden>Nouveau dans la collecte</span></div>

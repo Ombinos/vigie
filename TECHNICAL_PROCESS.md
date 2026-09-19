@@ -118,6 +118,31 @@ Doctrine: **every silence is a diagnosed fact, and every diagnosis feeds a fixed
 - Bandwidth is rent: feed fetches are conditional (ETag / If-Modified-Since with a local body cache); a 304 returns the cached body, costs zero payload bytes, and the run meta records `not_modified` — the collection still happened, honestly.
 - All ledgers: no wall clock (stamps come from the data), fail-soft (corrupt input → empty facts, exit 0), never published, never staged.
 
+## Data lifecycle (efficiency law)
+
+- `data/raw/<source>/<stamp>_<digest>.xml` is append-only, one file per run so
+  offline rebuilds and edition diffs can address a stamp. Identical bytes (a 304
+  or an unchanged feed) are hard-linked to the previous run, so a repeated feed
+  costs no extra disk while every stamp stays addressable.
+- Raw snapshots and their meta pairs are pruned after 30 days; the newest pair
+  per source and the newest run log always survive offline rebuilds.
+- `data/raw/_bodies/` caches the last body per URL for conditional GET
+  (ETag / If-Modified-Since); a 304 returns it and costs zero payload bytes.
+- `data/media/brief/` is content-named (`sha256(url)[:20]`), capped at 900 KB,
+  and pruned when an article leaves the local scope; nothing is invented or
+  cropped, and no publisher channel means no image at all.
+- `data/ops/` ledgers are capped by design (media 28 runs, feed/edition
+  windows, watchdog 26 weeks) and written atomically; internal, never staged.
+- `data/` and `deploy/` are unversioned: a git-built edition starts without
+  cross-edition memory, and the six-hour refresh restores it.
+
+## Release law (hardening)
+
+- `stage_public.py` serializes the release swap with an `O_EXCL` lock in `deploy/` (reclaimed after 10 min) and retries transient Windows sharing violations (`winerror` 5/32/33 only), so the six-hour refresh and a manual `verify.py` can never rename `deploy/public` at the same instant.
+- `verify.py` refuses to stage an empty edition (0 candidates) on every path, not only `--rebuild`: one surviving source that yields nothing cannot overwrite a good production site. The previous release stays up.
+- Pipeline stores are written with unique-temp atomic replacement (`store_io`); a crash, a full disk or overlapping writers never expose a truncated handoff file.
+- A feed network/DNS failure is diagnosed as transient, never as a permanent guard rejection, so one resolver blip does not blind an article or image forever.
+
 ## Success / failure
 
 Wrong if: skim-feed behavior; hidden party line; Near me full of world wire; Issues with one voice calling themselves contradictions.

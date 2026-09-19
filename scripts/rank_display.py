@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import store_io
+import resident_brief
 
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATES = ROOT / "data" / "normalized" / "latest_candidates.json"
@@ -214,7 +215,10 @@ def score_item(c: dict, now: datetime) -> float:
 
 
 def esc(s: str) -> str:
-    text = "" if s is None else str(s)
+    # Same display-spoofing control strip as the brief: explorer/morning are
+    # public surfaces too, and a hostile feed must not inject bidi overrides
+    # or zero-width marks into a relayed title there either.
+    text = resident_brief.sanitize(s)
     return (
         text
         .replace("&", "&amp;")
@@ -255,23 +259,6 @@ def is_booth_or_brief(c: dict) -> bool:
     return "/ohdio/" in url or "/en-bref/" in url
 
 
-def is_ohdio(c: dict) -> bool:
-    """Kept for call sites that still name the booth; defers to shared path."""
-    return is_booth_or_brief(c)
-
-
-def topic_line(c: dict) -> str:
-    if not isinstance(c, dict):
-        return ""
-    topics = impact_block(c).get("topics") or []
-    labels = [t.get("topic") for t in topics if isinstance(t, dict) and t.get("topic")]
-    st = c.get("enrich_status") or "pending"
-    geo = display_geo(c)
-    if labels:
-        return f"geo:{geo} · enrich: {st} · " + ", ".join(labels[:3])
-    return f"geo:{geo} · enrich: {st}"
-
-
 def item_topics(c: dict) -> list[str]:
     topics = impact_block(c).get("topics") or []
     return [str(t.get("topic")) for t in topics if isinstance(t, dict) and t.get("topic")]
@@ -302,17 +289,7 @@ def build_continuity(issues: list[dict], ranked: list[dict]) -> dict:
             continue
         for cid in issue_candidate_ids(iss):
             id_to_issues.setdefault(cid, []).append(iss)
-    topic_to_ids: dict[str, list[str]] = {}
-    for c in ranked:
-        if not isinstance(c, dict):
-            continue
-        cid = str(c.get("id") or "")
-        if not cid:
-            continue
-        for top in item_topics(c):
-            if top and top != "other":
-                topic_to_ids.setdefault(top, []).append(cid)
-    return {"by_id": by_id, "id_to_issues": id_to_issues, "topic_to_ids": topic_to_ids}
+    return {"by_id": by_id, "id_to_issues": id_to_issues}
 
 
 def same_fight_links(c: dict, continuity: dict, *, limit: int = 3) -> list[tuple[str, str]]:
@@ -880,7 +857,8 @@ def issue_stage_html(iss: dict, continuity: dict | None = None, *, panel_id: str
     silence = iss.get("silence") or {}
     if not isinstance(silence, dict):
         silence = {}
-    silent_n = safe_int(silence.get("silent_count"))
+    silent_rows = [s for s in (silence.get("silent") or []) if isinstance(s, dict)]
+    silent_n = safe_int(silence.get("silent_count"), len(silent_rows))
     spoke_n = len(spoke_institutions_for_stage(iss)) or safe_int(
         silence.get("spoke_count"), safe_int(iss.get("source_count"))
     )
@@ -1173,7 +1151,6 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
         seen_m.add(u)
         prov_moved.append(c)
     prov_moved = prov_moved[:15]
-    prov_shown = prov_impact + prov_moved
     prov_total = len(buckets["province"])
 
     linked_ordered = impact_first(buckets["linked"])
@@ -1181,7 +1158,6 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
     linked_booths = [c for c in linked_ordered if is_booth_or_brief(c)]
     linked_impact = linked_life[:DISPLAY_CAP]
     linked_moved = linked_booths[:10]
-    linked_shown = linked_impact + linked_moved
     linked_total = len(buckets["linked"])
 
     radar_prov = "".join(near_rail_item(c, continuity, faces_map) for c in prov_impact) or "<p class='empty'>Nothing in Province yet.</p>"
@@ -1244,7 +1220,7 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
         "<h2 class='stage-title'>Province &amp; Linked — impact first</h2>"
         "<p class='rule'>Life-hit approaches already on disk. Not a painted feed. Pick a fight on the left to open the Stage.</p>"
         f"<p class='cap'>Province showing {len(prov_impact)} of {prov_total} (life-hit)"
-        + (f" — includes {demoted_booth} booth/brief demoted from Near me" if demoted_booth else "")
+        + " · life-hit only; booth/brief in Moved strip"
         + "</p>"
         f"<div class='radar-grid'>{radar_prov_m}</div>"
         f"{radar_moved_m}"
@@ -1395,7 +1371,6 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
     pulse_json = (
         json.dumps(pulse, ensure_ascii=False, separators=(",", ":"))
         .replace("<", "\\u003c")
-        .replace("</", "<\\/")
     )
 
     import life_facets
@@ -1409,7 +1384,6 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
             separators=(",", ":"),
         )
         .replace("<", "\\u003c")
-        .replace("</", "<\\/")
     )
     facet_toggles = "".join(
         (
@@ -2327,6 +2301,15 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
     var linkArchArr = document.getElementById("link-archive-arrival");
     if (linkArchArr) linkArchArr.addEventListener("click", function () {{
       openField();
+      // The anchor target starts display:none; reveal it and keep the topnav
+      // toggle in sync, or the promised Archive never appears.
+      var archiveEl = document.getElementById("archive");
+      if (archiveEl) archiveEl.classList.add("open");
+      var archBtn = document.getElementById("btn-archive");
+      if (archBtn) {{
+        archBtn.setAttribute("aria-expanded", "true");
+        archBtn.textContent = "Close archive";
+      }}
     }});
     var linkMethodArr = document.getElementById("link-method-arrival");
     if (linkMethodArr) linkMethodArr.addEventListener("click", function () {{
@@ -2576,7 +2559,7 @@ def main() -> None:
     print(f"display: booth/brief demoted from Near me to Province: {booth_n}")
     print(f"clock: {clock_line(clock)}")
     if ranked:
-        print("top:", ranked[0].get("title", "")[:100], ranked[0]["rank_score"])
+        print("top:", str(ranked[0].get("title") or "")[:100], ranked[0]["rank_score"])
 
     # Ambient twin — same store Approaches; never a second ranking.
     import ambient_pulse

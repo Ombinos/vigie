@@ -6,8 +6,11 @@ obsolete assets. Files are copied from their authoritative sources.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -98,6 +101,99 @@ def _safe_remove(path: Path, parent: Path) -> None:
 
 
 STALE_STAGE_SECONDS = 24 * 3600
+RENAME_ATTEMPTS = 8
+RENAME_BASE_DELAY = 0.2
+# Windows codes for "file in use": ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION,
+# ERROR_LOCK_VIOLATION. Only those (and their POSIX errno cousins) are retried;
+# a genuine filesystem failure must surface immediately.
+TRANSIENT_RENAME_WINERR = frozenset({5, 32, 33})
+TRANSIENT_RENAME_ERRNO = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY})
+STAGE_LOCK_NAME = ".vigie-stage.lock"
+STAGE_LOCK_STALE_SECONDS = 10 * 60
+STAGE_LOCK_WAIT_SECONDS = 60.0
+
+
+def _is_transient_rename_error(exc: OSError) -> bool:
+    if getattr(exc, "winerror", None) in TRANSIENT_RENAME_WINERR:
+        return True
+    return exc.errno in TRANSIENT_RENAME_ERRNO
+
+
+def _rename_retry(source: Path, target: Path) -> None:
+    """Rename, tolerating the transient Windows sharing violation (WinError 32).
+
+    Antivirus, the search indexer or a just-finished reader can hold a handle
+    on a file inside the tree for a moment, making Path.rename fail with
+    "used by another process". Retry only those transient errors with a short
+    backoff; anything else propagates at once so a broken swap never publishes.
+    """
+    delay = RENAME_BASE_DELAY
+    for attempt in range(RENAME_ATTEMPTS):
+        try:
+            source.rename(target)
+            return
+        except FileNotFoundError:
+            # A concurrent stager moved the source between our check and the
+            # rename; the caller decides what that means.
+            raise
+        except OSError as exc:
+            if attempt == RENAME_ATTEMPTS - 1 or not _is_transient_rename_error(exc):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)
+
+
+@contextlib.contextmanager
+def _stage_lock(parent: Path):
+    """Serialize the release swap between concurrent stagers.
+
+    The six-hour scheduled refresh, a manual `verify.py` and a manual
+    `pipeline.py --stage` can overlap; without this, two processes rename the
+    same `deploy/public` at once and one fails (or publishes a half-race). A
+    lock older than ten minutes is treated as a crashed stager. If the
+    filesystem refuses locking at all, staging proceeds unsynchronized rather
+    than block a deploy.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    lock = parent / STAGE_LOCK_NAME
+    token = str(os.getpid())
+    acquired = False
+    waited = 0.0
+    delay = 0.1
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > STAGE_LOCK_STALE_SECONDS:
+                    lock.unlink()
+                    continue
+            except OSError:
+                continue
+            if waited >= STAGE_LOCK_WAIT_SECONDS:
+                raise RuntimeError(
+                    "Another staging run is active; refusing to race the release swap")
+            time.sleep(delay)
+            waited += delay
+            delay = min(delay * 2, 1.0)
+        except OSError:
+            break  # cannot lock here: proceed without serialization
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(token)
+            acquired = True
+            break
+    try:
+        yield
+    finally:
+        if acquired:
+            try:
+                if lock.read_text(encoding="utf-8", errors="replace").strip() == token:
+                    lock.unlink()
+            except OSError:
+                pass
+
+
 
 
 def _sweep_stale_siblings(parent: Path, output_name: str) -> None:
@@ -198,22 +294,29 @@ def stage(root: Path = ROOT, output: Path = OUT) -> dict:
         (temporary / "build-manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
-        if output.exists():
-            if output.resolve().parent != output.parent.resolve() or not output.is_dir():
-                raise ValueError("Unsafe publish destination")
-            backup = Path(tempfile.mkdtemp(prefix=".vigie-previous-", dir=output.parent))
-            backup.rmdir()
-            # Rename only checked direct children of the chosen destination parent.
-            output.rename(backup)
-        try:
-            temporary.rename(output)
-        except BaseException:
+        with _stage_lock(output.parent):
+            if output.exists():
+                if output.resolve().parent != output.parent.resolve() or not output.is_dir():
+                    raise ValueError("Unsafe publish destination")
+                backup = Path(tempfile.mkdtemp(prefix=".vigie-previous-", dir=output.parent))
+                backup.rmdir()
+                # Rename only checked direct children of the chosen destination parent.
+                try:
+                    _rename_retry(output, backup)
+                except FileNotFoundError:
+                    # Another staging process moved the previous release between
+                    # our existence check and the rename: nothing left to back up.
+                    backup = None
+            try:
+                _rename_retry(temporary, output)
+            except BaseException:
+                # A concurrent stager may already have published its own release;
+                # never clobber a complete release that is not ours to restore.
+                if backup is not None and not output.exists():
+                    _rename_retry(backup, output)
+                raise
             if backup is not None:
-                backup.rename(output)
-                backup = None
-            raise
-        if backup is not None:
-            _safe_remove(backup, output.parent)
+                _safe_remove(backup, output.parent)
         return manifest
     finally:
         _safe_remove(temporary, output.parent)

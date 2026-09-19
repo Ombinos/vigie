@@ -26,6 +26,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import store_io
+
 ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = ROOT / "data" / "raw"
 OUT = ROOT / "data" / "ops" / "feed_health.json"
@@ -75,6 +77,8 @@ def load_source_timeline(src_dir: Path, limit: int = RUNS_EXAMINED) -> list[dict
                              "error": "unreadable meta", "bytes": None, "not_modified": False})
             continue
         if not isinstance(doc, dict):
+            timeline.append({"at": at, "ok": False, "items": None, "parse_error": None,
+                             "error": "foreign meta", "bytes": None, "not_modified": False})
             continue
         items = _safe_int(doc.get("item_count"))
         if items is None:
@@ -237,10 +241,7 @@ def compile_health(raw_dir: Path | None = None, out_path: Path | None = None) ->
         "sources": sources,
     }
     try:
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        part = out_path.with_name(out_path.name + ".tmp")
-        part.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-        part.replace(out_path)
+        store_io.write_json_atomic(out_path, doc)
     except OSError:
         pass
     return doc

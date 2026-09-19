@@ -1,0 +1,51 @@
+# AGENTS.md — working in Vigie
+
+Vigie is a free, non-commercial, French-first Québec City news brief: static
+HTML, Python 3.12+ **stdlib only** (no pip, no SaaS). Read `VISION.md`,
+`RENT.md`, `TECHNICAL_PROCESS.md` and `LEGAL_RISK.md` before changing behaviour.
+The non-commercial vow, author/image attribution (R1/R2), never-rewrite (R8),
+no-circumvention (R9) and same-day opt-out (R10) are permanent house law.
+
+## Commands (from the repo root)
+
+```text
+python -X utf8 scripts/pipeline.py                 # full online collection + render
+python -X utf8 scripts/pipeline.py --offline       # rebuild from cached snapshots (no network)
+python -X utf8 scripts/pipeline.py --render-only   # re-render from existing stores
+python -X utf8 scripts/verify.py                   # tests + syntax + stage + HTTP smoke
+python -X utf8 scripts/verify.py --code-only       # code checks without downloaded data
+python -X utf8 scripts/serve.py                    # local preview: http://127.0.0.1:8765/
+python -X utf8 scripts/refresh.py                  # collect -> verify -> stage -> deploy (production)
+```
+
+Run `python -X utf8 scripts/verify.py` (or `--code-only`) after every change.
+Production deploys **only** through `scripts/refresh.py`; never deploy
+`deploy/public` by hand and never commit `.env.local`, `data/` or `deploy/`.
+Tests alone: `python -X utf8 -m unittest discover -s tests`.
+
+## Layout
+
+| Path | Role |
+|------|------|
+| `scripts/*.py` | one pipeline stage per file, orchestrated by `scripts/pipeline.py` |
+| `tests/` | unittest (stdlib), live-data checks are guarded with `skipTest` |
+| `public/` | hand-authored assets; generated `*.html` is gitignored |
+| `public/assets/` | authoritative CSS/JS for the brief |
+| `data/` | runtime stores, raw snapshots, ops ledgers (gitignored) |
+| `deploy/` | staged release (gitignored) |
+| root `*.md` | published method ("law of the house"); `/legal.md` is served |
+
+## Conventions
+
+- **Stdlib only.** No new dependencies, no network in render/verify.
+- **Fail-soft.** A corrupt store yields empty facts and exit 0; a feed outage
+  never blocks the news pipeline.
+- **Atomic writes.** Every store write goes through `scripts/store_io.py`
+  (unique-temp replace); identical raw snapshots are hard-linked, never recopied.
+- **Diagnosed silence.** Every absence is a recorded fact; absence is never
+  "resolved" or "ended". Absence of facts is reported as absence, not health.
+- **No rewriting.** Publisher titles/excerpts stay verbatim (truncated only);
+  bare emails are never published; 403/410/paywalls are never circumvented.
+- **Deterministic output.** No wall clock in ledgers, sorted iteration, stable
+  ids (`sha256` of canonical URL). Same inputs must rebuild byte-identically.
+- **Line endings.** Text is LF (`.gitattributes`); keep `sources.yaml` LF.

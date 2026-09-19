@@ -20,6 +20,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import store_io
+
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES_PATH = ROOT / "sources.yaml"
 RAW_DIR = ROOT / "data" / "raw"
@@ -330,6 +332,13 @@ def _write_body_cache(url: str, raw: bytes) -> None:
         pass
 
 
+def _delete_body_cache(url: str) -> None:
+    try:
+        _body_cache_path(url).unlink()
+    except OSError:
+        pass
+
+
 def fetch_bytes(url: str) -> tuple[bytes, str | None]:
     """Fetch with retries, optional alternate URLs (CBC scar) and conditional GET.
 
@@ -395,6 +404,14 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
                             }
                             _save_http_cache(cache)
                             _write_body_cache(candidate, body)
+                        else:
+                            # A 200 with no validators invalidates any previous
+                            # ETag/body pair: a later confused 304 must never
+                            # resurrect a body older than the one just observed.
+                            if candidate in cache:
+                                cache.pop(candidate, None)
+                                _save_http_cache(cache)
+                            _delete_body_cache(candidate)
                         return body, content_type
                 except ValueError:
                     raise
@@ -468,8 +485,11 @@ def _link_text(item: ET.Element) -> str | None:
     return fallback
 
 
-EMAIL_AUTHOR_RE = re.compile(r"^\S+@\S+\s*\(([^)]+)\)")
-EMAIL_TOKEN_RE = re.compile(r"\S*@\S*")
+EMAIL_AUTHOR_RE = re.compile(r"^[^\s@]+@[^\s@]+\s*\(([^)]+)\)")
+# Linear token regex: \S*@\S* is quadratic on a long @-free token (each start
+# position scans to the end), so a hostile author field could hang ingest. The
+# [^\s@] classes cannot cross a separator, so matching stays linear.
+EMAIL_TOKEN_RE = re.compile(r"[^\s@]*@[^\s@]*")
 
 
 def _clean_person(value: str | None, limit: int = 120) -> str | None:
@@ -478,7 +498,9 @@ def _clean_person(value: str | None, limit: int = 120) -> str | None:
     displayable name: it is dropped, never published."""
     if not isinstance(value, str) or not value.strip():
         return None
-    value = " ".join(value.split())
+    # Cap before matching: the output is <=limit, and a megabyte-long hostile
+    # creator must never be scanned.
+    value = " ".join(value.split())[:1000]
     m = EMAIL_AUTHOR_RE.match(value)
     if m:
         value = m.group(1)
@@ -637,10 +659,11 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
     digest = sha256_hex(raw)
     prev_xmls = sorted(dest_dir.glob("*.xml"))
     # The collection happened; the bytes simply repeat the previous snapshot
-    # (a 304 or an unchanged feed). Recorded as a fact, never hidden.
+    # (a 304 or an unchanged feed). Recorded as a fact, never hidden. Identical
+    # bytes are hard-linked to the previous run instead of copied again.
     not_modified = bool(prev_xmls) and prev_xmls[-1].name.endswith(f"_{digest[:12]}.xml")
     xml_path = dest_dir / f"{stamp}_{digest[:12]}.xml"
-    xml_path.write_bytes(raw)
+    store_io.write_bytes_dedup(xml_path, raw, prev_xmls[-1] if not_modified else None)
 
     parse_error = None
     items: list[dict] = []
@@ -776,7 +799,16 @@ def main() -> int:
     print(f"Vigie ingest {fetched_at.isoformat()} — {len(sources)} enabled RSS")
     for src in sources:
         print(f"  fetch {src['id']} ...", flush=True)
-        result = ingest_one(src, fetched_at)
+        try:
+            result = ingest_one(src, fetched_at)
+        except OSError as exc:
+            # A transient snapshot write failure (antivirus/search indexer
+            # holding a handle) must cost this one source, never the run.
+            result = {
+                "source_id": src["id"],
+                "ok": False,
+                "error": f"store_write_failed: {type(exc).__name__}: {exc}",
+            }
         slim = {
             "source_id": result["source_id"],
             "ok": result["ok"],

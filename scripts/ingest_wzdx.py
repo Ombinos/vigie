@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ingest_rss import SOURCES_PATH, fetch_bytes, load_enabled_by_type, sha256_hex, utc_now
+import store_io
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw"
@@ -141,7 +142,10 @@ def parse_event(feature: object) -> tuple[dict | None, str | None]:
     if not isinstance(feature, dict) or not isinstance(feature.get("properties"), dict):
         return None, "malformed"
     props = feature["properties"]
-    event_id = str(feature.get("id") or "").strip()
+    # RFC 7946 allows numeric ids; `0 or ""` would drop a valid feature, so
+    # only None/"" count as missing.
+    raw_id = feature.get("id")
+    event_id = "" if raw_id is None else str(raw_id).strip()
     if not event_id:
         return None, "missing_identifier"
     points = _points(feature.get("geometry"))
@@ -452,7 +456,9 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
             snapshot = dest_dir / f"{stamp}_{digest[:12]}.geojson"
             archived = True
             try:
-                snapshot.write_bytes(raw)
+                prev_snaps = sorted(dest_dir.glob("*.geojson"))
+                same = bool(prev_snaps) and prev_snaps[-1].name.endswith(f"_{digest[:12]}.geojson")
+                store_io.write_bytes_dedup(snapshot, raw, prev_snaps[-1] if same else None)
             except OSError as exc:
                 archived = False
                 print(f"  WARN {source_id}: snapshot not archived ({exc}); continuing from memory")
@@ -517,10 +523,7 @@ def collect(sources: list[dict], now: datetime, *, offline: bool = False,
     )
     store = build_store(sources[0], active, counts, diff, store_fetched_at, history)
     try:
-        store_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = store_path.with_name(store_path.name + ".tmp")
-        tmp.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(store_path)
+        store_io.write_json_atomic(store_path, store)
     except OSError as exc:
         print(f"  FAIL store write ({type(exc).__name__}: {exc}); keeping previous store")
         return {"ok": False, "reason": "store_write_failed"}

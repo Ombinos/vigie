@@ -67,6 +67,7 @@ from ingest_rss import (  # noqa: E402
     USER_AGENT, FALLBACK_USER_AGENT,
 )
 import ingest_rss  # noqa: E402  (_item_credit - one attribution parser, one law)
+import store_io  # noqa: E402  (unique-temp atomic writes for the manifest/health)
 
 RANKED = ROOT / "data" / "normalized" / "latest_ranked.json"
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
@@ -149,8 +150,13 @@ def fetch_image(url: str, referer: str = "", *, retries: int = 2,
 
     try:
         public_http_url(url, resolve=True)
-    except (ValueError, OSError, TypeError) as exc:
+    except (ValueError, TypeError) as exc:
         fail("image_guard_rejected", f"{type(exc).__name__}: {exc}")
+        return None
+    except OSError as exc:
+        # Transient DNS failure, not a policy rejection: retry later rather
+        # than marking the image permanently unavailable.
+        fail("image_network_error", f"{type(exc).__name__}: {exc}")
         return None
     ua = choose_user_agent(url)
     headers = {
@@ -313,8 +319,10 @@ def _gate_active(entry: dict, now: datetime) -> bool:
         return False
     try:
         when = datetime.fromisoformat(stamp)
-    except ValueError:
+    except (ValueError, TypeError):
         return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
     return when > now
 
 
@@ -389,9 +397,7 @@ def write_health_ledger(doc: dict, path: Path = HEALTH) -> None:
             "history": history[-HEALTH_HISTORY_CAP:],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        part = path.with_name(path.name + ".tmp")
-        part.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-        part.replace(path)
+        store_io.write_json_atomic(path, out)
     except (OSError, ValueError, TypeError, AttributeError):
         pass
 
@@ -514,7 +520,10 @@ def update_media(scope: list[dict], *, offline: bool = False,
         feed_img = feed_hit.get("image")
         feed_credit = feed_hit.get("credit")
         prev_reason = prev.get("reason") if isinstance(prev, dict) else None
-        attempts = int(prev.get("attempts") or 0) if isinstance(prev, dict) else 0
+        try:
+            attempts = int(prev.get("attempts") or 0) if isinstance(prev, dict) else 0
+        except (TypeError, ValueError):
+            attempts = 0
         # The publisher was silent on the page itself but their own feed
         # carries an image: skip the HTML round-trip entirely.
         image_only = prev_reason == "no_publisher_image" and bool(feed_img)
@@ -596,9 +605,7 @@ def update_media(scope: list[dict], *, offline: bool = False,
         "media": entries,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    part = manifest_path.with_name(manifest_path.name + ".tmp")
-    part.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-    part.replace(manifest_path)
+    store_io.write_json_atomic(manifest_path, doc)
     write_health_ledger(doc, health_file)
 
     # Prune orphans only after the new manifest is durable.
@@ -631,7 +638,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         doc = update_media(scope, offline=args.offline)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
+        # The media sentinel is an aid: a corrupt manifest field must never stop
+        # the chain (module law: always exits 0, keeping the previous manifest).
         print(f"brief media: FAIL {exc} - keeping previous manifest")
         return 0
     print(f"brief media -> {MANIFEST.relative_to(ROOT)}")

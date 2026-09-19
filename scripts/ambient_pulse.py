@@ -59,6 +59,8 @@ def build_digest(
     continuity = rank_display.build_continuity(issues or [], ranked or [])
     approaches = rank_display.build_approaches(issues or [], continuity)
     # Rebuilding an undated/empty store is not a new collection of news.
+    # Deliberately falls back to "" (rendered "date unknown"), never to the
+    # build clock: an absent collection date must stay absent (test-locked).
     c_at = clustered_at or clustered_at_from_issues(issues or [], "")
     pulse = rank_display.pulse_payload(approaches, c_at)
     # Same filter-then-slice as rank_display.build_approaches: a malformed entry
@@ -126,8 +128,10 @@ def stage_fight_issue_ids(issues: list[dict]) -> list[str]:
     malformed entry shift the cap and make the twin guard fail spuriously.
     """
     out: list[str] = []
-    for iss in [x for x in (issues or []) if isinstance(x, dict)][: rank_display.APPROACH_MAX]:
-        out.append(str(iss.get("issue_id") or iss.get("scar") or ""))
+    for i, iss in enumerate(
+        [x for x in (issues or []) if isinstance(x, dict)][: rank_display.APPROACH_MAX]
+    ):
+        out.append(str(iss.get("issue_id") or iss.get("scar") or f"idx-{i}"))
     return out
 
 
@@ -264,7 +268,6 @@ def render_morning_html(digest: dict) -> str:
     pulse_json = (
         json.dumps(pulse, ensure_ascii=False, separators=(",", ":"))
         .replace("<", "\\u003c")
-        .replace("</", "<\\/")
     )
     c_at = rank_display.esc(str(digest.get("clustered_at") or ""))
     built = rank_display.esc(str(digest.get("built_at") or ""))
@@ -279,7 +282,7 @@ def render_morning_html(digest: dict) -> str:
   <title>Vigie — Morning pulse</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Figtree:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;family=Figtree:wght@400;500;600&amp;display=swap" rel="stylesheet" />
   <style>
     :root {{
       /* beauty-without-fog-v0.1 — shared Arrival tokens */

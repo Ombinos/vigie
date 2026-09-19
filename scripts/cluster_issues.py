@@ -496,6 +496,7 @@ def main() -> None:
 
     issues = []
     dropped_single = 0
+    dropped_no_city_anchor = 0
     now = instant.isoformat()
     for scar, items in buckets.items():
         if not items:
@@ -503,6 +504,7 @@ def main() -> None:
         # quebec-city-first, unless scar is Province-OK (airport)
         if scar not in PROVINCE_OK:
             if not any(geo_of(it) == "quebec-city" for it in items):
+                dropped_no_city_anchor += 1
                 continue
 
         def voice_id(it: dict) -> str:
@@ -641,6 +643,7 @@ def main() -> None:
         ),
         "issue_count": len(issues),
         "dropped_single_voice": dropped_single,
+        "dropped_no_city_anchor": dropped_no_city_anchor,
         "excluded_candidates": dict(excluded),
         "publication_window_days": MAX_AGE_DAYS,
         "chancellery_enabled": [s.get("id") for s in chancellery],
@@ -655,7 +658,8 @@ def main() -> None:
     }
     store_io.write_json_atomic(OUT_ISSUES, out)
     store_io.write_json_atomic(history_path, history)
-    print(f"issues {len(issues)} (dropped single-voice {dropped_single}) -> {OUT_ISSUES}")
+    print(f"issues {len(issues)} (dropped single-voice {dropped_single}, "
+          f"no city anchor {dropped_no_city_anchor}) -> {OUT_ISSUES}")
     for i in issues[:8]:
         print("-", i["scar"], "|", i["question"][:90], "| voices", i["source_count"], "| geos", i["geo_focus"])
 
