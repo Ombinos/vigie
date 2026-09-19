@@ -202,6 +202,8 @@ def normalize_item(raw_item: dict, source_meta: dict) -> dict | None:
         "geo": source_meta.get("geo"),
         "nest_role": source_meta.get("nest_role"),
         "guid": raw_item.get("guid"),
+        "author": plain_text(raw_item.get("author"), 120),
+        "photo_credit": plain_text(raw_item.get("credit"), 120),
         "fetched_at": fetched.isoformat() if fetched else fetched_raw,
         "enrich_status": "pending",  # proposals come later; never truth
     }

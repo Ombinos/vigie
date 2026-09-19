@@ -142,7 +142,19 @@ class ManifestGuards(unittest.TestCase):
             "b2" * 10: {"file": None},
             "0f" * 10: "not-a-dict",
         }})
-        self.assertEqual(self.load(doc), {uid: uid + ".jpg"})
+        self.assertEqual(self.load(doc), {uid: {"file": uid + ".jpg", "credit": None}})
+
+    def test_credit_passes_only_as_a_bounded_string(self) -> None:
+        uid = "ab" * 10
+        doc = json.dumps({"method": "brief-media-v2", "media": {
+            uid: {"file": uid + ".jpg", "credit": "  Jean Tremblay  "},
+            "cd" * 10: {"file": ("cd" * 10) + ".jpg", "credit": 42},
+            "ef" * 10: {"file": ("ef" * 10) + ".png", "credit": "x" * 500},
+        }})
+        loaded = self.load(doc)
+        self.assertEqual(loaded[uid]["credit"], "Jean Tremblay")
+        self.assertIsNone(loaded["cd" * 10]["credit"])
+        self.assertEqual(len(loaded["ef" * 10]["credit"]), 120)
 
     def test_foreign_corrupt_or_missing_manifest_renders_no_images(self) -> None:
         for content in ('{"method": "other-v9", "media": {}}', "garbage", "[]", ""):
@@ -157,12 +169,29 @@ class RendererImages(unittest.TestCase):
 
     def test_image_renders_as_local_lazy_img(self) -> None:
         row = self.row()
-        html = brief.article_html(row, 1, [], media={row["uid"]: row["uid"] + ".jpg"})
+        html = brief.article_html(row, 1, [], media={row["uid"]: {"file": row["uid"] + ".jpg", "credit": None}})
         self.assertIn(
-            f'<div class="story-media"><img src="/media/{row["uid"]}.jpg" alt="" loading="lazy" decoding="async"></div>',
+            f'<figure class="story-media"><img src="/media/{row["uid"]}.jpg" alt="" loading="lazy" decoding="async">',
             html,
         )
+        self.assertIn("<figcaption class=\"media-credit\">Photo : Source locale</figcaption>", html)
         self.assertEqual(html.count("<img"), 1)
+
+    def test_photographer_credit_renders_beside_the_source(self) -> None:
+        row = self.row()
+        html = brief.article_html(row, 1, [], media={row["uid"]: {
+            "file": row["uid"] + ".jpg", "credit": "Simon Séguin-Bertrand"}})
+        self.assertIn(
+            '<figcaption class="media-credit">Photo : Simon Séguin-Bertrand / Source locale</figcaption>',
+            html,
+        )
+
+    def test_credit_is_escaped_and_never_invents_markup(self) -> None:
+        row = self.row()
+        html = brief.article_html(row, 1, [], media={row["uid"]: {
+            "file": row["uid"] + ".jpg", "credit": '<script>alert("x")</script>'}})
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
 
     def test_no_media_no_img(self) -> None:
         row = self.row()
@@ -172,7 +201,9 @@ class RendererImages(unittest.TestCase):
     def test_hostile_media_values_never_render(self) -> None:
         row = self.row()
         for bad in ("../../evil.jpg", "https://evil.example/x.jpg", ("x" * 20) + ".svg",
-                    ("A" * 20) + ".jpg", None, 42, ""):
+                    ("A" * 20) + ".jpg", None, 42, "",
+                    {"file": "../../evil.jpg"}, {"file": ("x" * 20) + ".svg"},
+                    {"file": None}, {"file": 42}, "not-a-dict"):
             with self.subTest(bad=repr(bad)):
                 html = brief.article_html(row, 1, [], media={row["uid"]: bad})
                 self.assertNotIn("<img", html)

@@ -49,6 +49,7 @@ Open http://127.0.0.1:8765/
 - `DESIGN.md` — beauty without fog (Arrival composition law)
 - `edge.md` — Edge Atlas: literal street-level joins (`edge-atlas-v1`)
 - `anomalies.md` — anomaly beacon: fixed-threshold structural rules (`anomaly-beacon-v1`)
+- `legal.md` — public legal page: fair-dealing basis, non-commercial vow, collection identity, retention, takedown commitment (linked from the brief footer)
 
 ## Enrich rules (proposed only)
 
@@ -72,6 +73,39 @@ Open http://127.0.0.1:8765/
 - v0: geo + recency
 - `w_impact` stays 0 until we choose to score provisional impacts in public
 - Silent editorial boosts forbidden
+
+## Legal compliance law (see LEGAL_RISK.md, legal.md)
+
+Vigie is a free, non-commercial news aggregator: it finds, organizes and relays what
+publishers publish themselves, and always links out to the original. These are permanent
+house law, not defaults to be "fixed" by a future feature.
+
+- **Never rewrite (R8)**: titles and excerpts stay verbatim — truncated, never padded,
+  completed or reworded. Distortion breaks fair dealing, CBC's terms, and adds defamation
+  surface. The excerpt is ≤240 chars of the publisher's own feed summary, labelled
+  « Extrait du flux de {source} ».
+- **Attribute (R1/R2)**: the byline carries the author name when the publisher's feed gives
+  one (`dc:creator` / `author` / `media:credit`); every re-hosted image carries
+  « Photo : {source} » (plus the photographer credit only when the publisher attached it to
+  that very feed image — never guessed for an og:image). s. 29.2 fair dealing for news
+  reporting requires source **and** author; both Canadian aggregation cases were lost on
+  missing author names.
+- **Never circumvent (R9)**: an HTTP refusal (403/406/410/429) is respected — never retried
+  under another identity, never routed around, no paywall or bot wall ever touched. Collection
+  identity is honest (`Vigie/0.2 (+https://vigieqc.com/legal.md)`); a disclosed browser
+  identity is used only for hosts that stall automated readers at *transport* level (recorded
+  in `data/raw/_ua_policy.json`, published in legal.md). Silence is diagnosed, never filled.
+- **Honor opt-outs (R10)**: a publisher asking to leave → `enabled: false` + `cut_reason` in
+  `sources.yaml`, same day (one edition). The silence map then reports the cut honestly —
+  never silently.
+- **Retention (R6)**: raw feed snapshots are pruned after 30 days (newest per source always
+  survives for offline rebuilds); preview images are deleted when an article leaves the local
+  brief scope.
+- **Non-commercial gate (R7, HARD LAW)**: no revenue, ads, paid tier or sponsored placement —
+  founder decision 2026-09-19 is that Vigie stays free permanently. s. 38.1 makes the
+  non-commercial state a $5 k-total statutory-damages ceiling; commercialization multiplies
+  exposure per work. If that decision is ever reversed, written publisher permissions and an
+  IP-lawyer sign-off come **before** the reversal.
 
 ## Machine room (self-diagnosis, no self-steering)
 

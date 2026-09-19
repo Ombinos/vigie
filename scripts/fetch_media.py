@@ -22,17 +22,16 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import rank_display as rd  # noqa: E402
-from ingest_rss import public_http_url, public_opener  # noqa: E402
+from ingest_rss import (  # noqa: E402
+    public_http_url, public_opener, choose_user_agent, mark_browser_identity,
+    USER_AGENT, FALLBACK_USER_AGENT,
+)
 
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
 RANKED = ROOT / "data" / "normalized" / "latest_ranked.json"
 ISSUES = ROOT / "data" / "issues" / "latest_issues.json"
 OUT = ROOT / "data" / "media" / "latest_faces.json"
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Vigie/0.2"
-)
 TIMEOUT = 14
 DISPLAY_CAP = 30
 MAX_FETCH = 90  # map-scoped ceiling — wallet thin
@@ -109,8 +108,9 @@ def fetch_html(url: str, *, retries: int = 2, diag: dict | None = None) -> str |
         fail("article_guard_rejected", f"{type(exc).__name__}: {exc}")
         return None
     host = urlparse(url).hostname or ""
+    ua = choose_user_agent(url)
     headers = {
-        "User-Agent": USER_AGENT,
+        "User-Agent": ua,
         "Accept": "text/html,application/xhtml+xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "fr-CA,fr;q=0.9,en-CA;q=0.8,en;q=0.7",
         "Cache-Control": "no-cache",
@@ -138,9 +138,16 @@ def fetch_html(url: str, *, retries: int = 2, diag: dict | None = None) -> str |
             return None
         except urllib.error.HTTPError as exc:
             last = (_classify_http_error(exc.code, "article"), f"HTTP {exc.code}")
+            # An HTTP refusal is respected - never retried under another identity.
         except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
             reason = "article_timeout" if _is_timeout(exc) else "article_network_error"
             last = (reason, f"{type(exc).__name__}: {exc}")
+            if ua == USER_AGENT:
+                # Transport-level stall of the honest identity: mark the host
+                # and continue under the disclosed browser identity.
+                mark_browser_identity(url, type(exc).__name__)
+                ua = FALLBACK_USER_AGENT
+                headers["User-Agent"] = ua
         if attempt + 1 < attempts:
             time.sleep(0.35 * (attempt + 1))
     fail(*last)

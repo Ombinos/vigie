@@ -137,12 +137,15 @@ _MEDIA_FILE = re.compile(r"[a-f0-9]{20}\.(?:jpg|jpeg|png|webp|avif|gif)")
 
 
 def load_brief_media() -> dict:
-    """uid -> local filename for publisher preview images (brief-media v1/v2).
+    """uid -> {"file", "credit"} for publisher preview images (brief-media v1/v2).
 
     Images are fetched at collection time and served from this site: reading
-    the brief never contacts a publisher. A foreign or corrupt manifest
-    renders no images rather than guessing, and only strict filenames pass,
-    so a hostile store can never aim an <img> outside /media/.
+    the brief never contacts a publisher. `credit` is the photographer name
+    from the publisher's own feed media, when there is one - it is only ever
+    set on feed-sourced images, so the caption can never misattribute an
+    og:image. A foreign or corrupt manifest renders no images rather than
+    guessing, and only strict filenames pass, so a hostile store can never
+    aim an <img> outside /media/.
     """
     try:
         doc = json.loads(MEDIA_MANIFEST.read_text(encoding="utf-8"))
@@ -153,12 +156,18 @@ def load_brief_media() -> dict:
     media = doc.get("media")
     if not isinstance(media, dict):
         return {}
-    return {
-        str(uid): entry["file"]
-        for uid, entry in media.items()
-        if isinstance(entry, dict) and isinstance(entry.get("file"), str)
-        and _MEDIA_FILE.fullmatch(entry["file"])
-    }
+    out = {}
+    for uid, entry in media.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
+            continue
+        if not _MEDIA_FILE.fullmatch(entry["file"]):
+            continue
+        credit = entry.get("credit")
+        out[str(uid)] = {
+            "file": entry["file"],
+            "credit": credit.strip()[:120] if isinstance(credit, str) and credit.strip() else None,
+        }
+    return out
 
 
 def prepare_items(ranked: list[dict], now: datetime) -> tuple[list[dict], int]:
@@ -857,30 +866,54 @@ def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = N
 
 def article_html(item: dict, index: int, related: list[dict], media: dict | None = None) -> str:
     title = esc(item["title"])
-    media_file = media.get(item["uid"]) if isinstance(media, dict) else None
+    source = esc(item.get("source_name") or item.get("source_id") or "Source")
+    media_entry = media.get(item["uid"]) if isinstance(media, dict) else None
+    if isinstance(media_entry, str):  # plain filename (older callers/tests)
+        media_file, media_credit = media_entry, None
+    elif isinstance(media_entry, dict):
+        media_file, media_credit = media_entry.get("file"), media_entry.get("credit")
+    else:
+        media_file, media_credit = None, None
     if not isinstance(media_file, str) or not _MEDIA_FILE.fullmatch(media_file):
         media_file = None
-    media_html = (
-        f'<div class="story-media"><img src="/media/{media_file}" alt="" loading="lazy" decoding="async"></div>'
-        if media_file else ""
-    )
+    if media_file:
+        # Attribution law (LEGAL_RISK.md R2): the publisher's name always sits
+        # beside the photo; a photographer name only when the publisher
+        # attached one to this very feed image - never guessed, never for an
+        # og:image we cannot credit.
+        credit = media_credit.strip() if isinstance(media_credit, str) and media_credit.strip() else None
+        caption = f"Photo : {esc(credit)} / {source}" if credit else f"Photo : {source}"
+        media_html = (
+            f'<figure class="story-media"><img src="/media/{media_file}" alt="" loading="lazy" decoding="async">'
+            f'<figcaption class="media-credit">{caption}</figcaption></figure>'
+        )
+    else:
+        media_html = ""
     geo = {"quebec-city": "Québec et environs", "quebec": "Au Québec", "linked": "Ailleurs"}.get(item["geo"], "Ailleurs")
     topic = TOPICS.get(item["topics"][0], "Vie locale")
-    source = esc(item.get("source_name") or item.get("source_id") or "Source")
     summary = item["summary"]
-    excerpt = summary[:240].rsplit(" ", 1)[0] + "…" if len(summary) > 240 else summary
+    truncated = len(summary) > 240
+    excerpt_base = summary[:240].rsplit(" ", 1)[0] if truncated else summary
+    excerpt = excerpt_base + "…" if truncated else summary
     excerpt_html = f'<p class="excerpt">{esc(excerpt)}</p><span class="excerpt-label">Extrait du flux de {source}</span>' if excerpt else '<p class="excerpt-label">Le flux ne fournit pas de résumé. Consultez l’article original.</p>'
+    # Attribution law (LEGAL_RISK.md R1): the author name when the publisher's
+    # feed gives one - s. 29.2 requires source AND author for news reporting.
+    author = plain(item.get("author"))[:120]
+    byline_author = f'Par {esc(author)}<span aria-hidden="true"> · </span>' if author else ""
     peers = "".join(f'<li><span>{esc(r.get("source_name") or r.get("source_id"))}</span><a href="{esc(r["url"])}" rel="noopener noreferrer">{esc(r["title"])}</a>{date_html(r["published"])}</li>' for r in related)
     related_html = f'<p class="evidence-label">Autres articles du dossier proposé</p><ul class="source-list">{peers}</ul><p class="fine">Rapprochement automatique à vérifier. Plusieurs médias ne constituent pas plusieurs confirmations indépendantes.</p>' if peers else '<p class="fine">Aucun autre article rapproché dans cette collecte. Cela ne dit rien de la couverture ailleurs.</p>'
     kind = '<span class="official">Source officielle</span>' if item.get("source_kind") == "official" else ''
     place_reason = "Un lieu ou acteur local a été repéré dans le titre ou l’extrait." if item["geo"] == "quebec-city" else "Le classement géographique est proposé à partir du titre et de l’extrait."
     if item.get("source_kind") == "official" and item["geo"] == "quebec-city":
         place_reason = "Ce document provient d’une source officielle locale."
-    return f'''<article class="story" id="article-{item['uid']}" data-id="{item['uid']}" data-geo="{esc(item['geo'])}" data-topics="{esc(' '.join(item['topics']))}" data-areas="{esc(' '.join(item['areas']))}" data-search="{esc(folded(item['title'] + ' ' + summary + ' ' + str(item.get('source_name', ''))))}" data-published="{esc(item['published'])}">
+    # The search index carries exactly what the reader sees (title + displayed
+    # excerpt), never the fuller internal summary (LEGAL_RISK.md R4).
+    search_text = esc(folded(item['title'] + ' ' + excerpt_base + ' ' + str(item.get('source_name', ''))))
+    return f'''<article class="story" id="article-{item['uid']}" data-id="{item['uid']}" data-geo="{esc(item['geo'])}" data-topics="{esc(' '.join(item['topics']))}" data-areas="{esc(' '.join(item['areas']))}" data-search="{search_text}" data-published="{esc(item['published'])}">
       <div class="story-number" aria-hidden="true">{index:02}</div><div class="story-body">
       {media_html}<div class="story-kicker"><span>{esc(topic)}</span><span>{geo}</span>{kind}<span class="new-label" hidden>Nouveau dans la collecte</span></div>
       <h3><a href="{esc(item['url'])}" rel="noopener noreferrer">{title}<span class="arrow" aria-hidden="true"> ↗</span></a></h3>
-      <p class="byline">{source}<span aria-hidden="true"> · </span>{date_html(item['published'])}{'<span class="language">Article en anglais</span>' if item.get('language') == 'en' else ''}</p>
+      <p class="byline">{byline_author}{source}<span aria-hidden="true"> · </span>{date_html(item['published'])}{'<span class="language">Article en anglais</span>' if item.get('language') == 'en' else ''}</p>
       {excerpt_html}
       <div class="story-actions"><details class="evidence"><summary>Sources et contexte <span aria-hidden="true">＋</span></summary><div class="evidence-body"><p>{place_reason} Ce repérage ne prouve pas un effet sur votre situation.</p>{related_html}</div></details>
       <button class="save js-only" type="button" data-save="{item['uid']}" aria-pressed="false" aria-label="Garder : {title}">Garder <span aria-hidden="true">＋</span></button></div>
@@ -935,4 +968,4 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 {dossiers_section(issues, eligible, edge_streets, edge_issues)}
 <section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>
 <section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><p>Les images d’aperçu proviennent des éditeurs (og:image ou média attaché à leur propre flux) : Vigie les récupère au moment de la collecte et les sert depuis ce site — votre navigateur ne contacte aucun éditeur en lisant ce point. Un article dont l’éditeur ne publie pas d’image reste sans image : aucune image n’est inventée.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
-<footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span></footer><div id="toast" role="status" aria-live="polite"></div></body></html>'''
+<footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span><a class="legal-link" href="/legal.md">Mentions légales, attribution et retrait</a></footer><div id="toast" role="status" aria-live="polite"></div></body></html>'''

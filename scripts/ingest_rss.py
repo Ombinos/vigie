@@ -17,21 +17,31 @@ import urllib.error
 import urllib.request
 from urllib.parse import urljoin, urlsplit
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES_PATH = ROOT / "sources.yaml"
 RAW_DIR = ROOT / "data" / "raw"
-USER_AGENT = (
+# Identity law (LEGAL_RISK.md R5/R9): the honest reader identity is the
+# default. Some origins (CBC is a documented scar) stall or reset transport
+# for automated-reader identities; those hosts are remembered in
+# _ua_policy.json and read with the disclosed browser identity instead. An
+# HTTP refusal (403/406/410/429) is ALWAYS respected - never retried under
+# another identity, never circumvented. Both identities are disclosed in
+# legal.md.
+USER_AGENT = "Vigie/0.2 (+https://vigieqc.com/legal.md; news aggregator; non-commercial)"
+FALLBACK_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Vigie/0.1"
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Vigie/0.2"
 )
+UA_POLICY_PATH = RAW_DIR / "_ua_policy.json"
 TIMEOUT = 25
 RETRIES = 3
 MAX_FEED_BYTES = 8 * 1024 * 1024
+RETENTION_DAYS = 30  # raw snapshot retention (LEGAL_RISK.md R6)
 
-# CBC often resets Python urllib with a custom UA; keep browser-like UA + alts.
+# CBC often resets Python urllib; URL alternates stay as a second path.
 URL_ALTERNATES = {
     "https://rss.cbc.ca/lineup/canada-montreal.xml": [
         "https://www.cbc.ca/cmlink/rss-canada-montreal",
@@ -48,6 +58,45 @@ ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _host_of(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower()
+
+
+def _load_ua_policy() -> dict:
+    try:
+        doc = json.loads(UA_POLICY_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def choose_user_agent(url: str) -> str:
+    """Honest identity by default; disclosed browser identity for hosts that
+    have stalled an automated reader at transport level (never for refusals)."""
+    entry = _load_ua_policy().get(_host_of(url))
+    if isinstance(entry, dict) and entry.get("identity") == "browser":
+        return FALLBACK_USER_AGENT
+    return USER_AGENT
+
+
+def mark_browser_identity(url: str, reason: str) -> None:
+    """Record a transport-level stall for a host. Fail-soft: an unwritable
+    policy file only means the stall is paid again on the next run."""
+    host = _host_of(url)
+    if not host:
+        return
+    try:
+        policy = _load_ua_policy()
+        policy[host] = {"identity": "browser", "reason": str(reason)[:80],
+                        "marked_at": utc_now().isoformat(timespec="seconds")}
+        UA_POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        part = UA_POLICY_PATH.with_name(UA_POLICY_PATH.name + ".tmp")
+        part.write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding="utf-8")
+        part.replace(UA_POLICY_PATH)
+    except OSError:
+        pass
 
 
 def _scalar(val: str):
@@ -261,6 +310,7 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
     cache = _load_http_cache()
     last_err: Exception | None = None
     for candidate in candidates:
+        ua = choose_user_agent(candidate)
         entry = cache.get(candidate)
         entry = entry if isinstance(entry, dict) else {}
         validators: dict[str, str] = {}
@@ -273,7 +323,7 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
                 try:
                     public_http_url(candidate, resolve=True)
                     headers = {
-                        "User-Agent": USER_AGENT,
+                        "User-Agent": ua,
                         "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
                         "Accept-Language": "en-CA,fr-CA;q=0.9,en;q=0.8",
                     }
@@ -316,9 +366,16 @@ def fetch_bytes(url: str) -> tuple[bytes, str | None]:
                         if cached_body is not None:
                             return cached_body, entry.get("content_type")
                         break  # validator without body: refetch unconditionally
-                    last_err = e
+                    last_err = e  # an HTTP refusal is respected, never identity-switched
                     continue
                 except Exception as e:
+                    if ua == USER_AGENT and isinstance(e, (OSError, http.client.HTTPException)):
+                        # Transport-level stall of the automated-reader identity
+                        # (the CBC scar): mark the host and retry under the
+                        # disclosed browser identity. Guard refusals (ValueError)
+                        # and HTTP refusals never land here.
+                        mark_browser_identity(candidate, type(e).__name__)
+                        ua = FALLBACK_USER_AGENT
                     last_err = e
                     continue
     assert last_err is not None
@@ -340,6 +397,45 @@ def _text(el: ET.Element | None) -> str | None:
 
 def _child(el: ET.Element, name: str) -> ET.Element | None:
     return next((child for child in el if _local(child.tag).lower() == name.lower()), None)
+
+
+EMAIL_AUTHOR_RE = re.compile(r"^\S+@\S+\s*\(([^)]+)\)")
+
+
+def _clean_person(value: str | None, limit: int = 120) -> str | None:
+    """Person fields can arrive as 'mail (Name)' (RSS 2.0 author). A bare
+    e-mail address is not a displayable name - dropped, never published."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = " ".join(value.split())
+    m = EMAIL_AUTHOR_RE.match(value)
+    if m:
+        value = m.group(1).strip()
+    elif "@" in value and " " not in value:
+        return None
+    return value[:limit] or None
+
+
+def _item_author(item: ET.Element) -> str | None:
+    """Article author as given by the publisher's own feed (dc:creator, author).
+
+    Attribution law (LEGAL_RISK.md R1): fair dealing for news reporting
+    requires the author name when the source gives it - both Canadian cases
+    lost on missing author credit (Cedrom-SNi, Stross)."""
+    return (_clean_person(_text(_child(item, "creator")))
+            or _clean_person(_text(_child(item, "author"))))
+
+
+def _item_credit(item: ET.Element) -> str | None:
+    """Photographer credit attached to the item (MRSS media:credit), when the
+    publisher gives one. Only ever rendered beside a feed-sourced image."""
+    for child in item.iter():
+        tag = child.tag if isinstance(child.tag, str) else ""
+        if tag.startswith("{") and _local(tag).lower() == "credit":
+            cleaned = _clean_person(_text(child))
+            if cleaned:
+                return cleaned
+    return None
 
 
 def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
@@ -372,6 +468,8 @@ def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
                     "body": desc,
                     "published_at": pub,
                     "guid": guid,
+                    "author": _item_author(item),
+                    "credit": _item_credit(item),
                 }
             )
     elif tag == "feed":
@@ -406,6 +504,11 @@ def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
                 if _local(child.tag).lower() == "id":
                     eid = _text(child)
                     break
+            author_el = _child(entry, "author")
+            author = None
+            if author_el is not None:
+                author = (_clean_person(_text(_child(author_el, "name")))
+                          or _clean_person(_text(author_el)))
             items.append(
                 {
                     "title": title,
@@ -414,6 +517,8 @@ def parse_feed(xml_bytes: bytes, base_url: str | None = None) -> list[dict]:
                     "published_at": published,
                     "updated_at": updated,
                     "guid": eid,
+                    "author": author,
+                    "credit": _item_credit(entry),
                 }
             )
     else:
@@ -516,6 +621,8 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
                 "published_at": it.get("published_at"),
                 "updated_at": it.get("updated_at"),
                 "guid": it.get("guid"),
+                "author": it.get("author"),
+                "credit": it.get("credit"),
                 "language": src.get("language"),
                 "fetched_at": fetched_at.isoformat(),
             }
@@ -526,6 +633,43 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
     meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     payload["meta_file"] = rel_or_abs(meta_path)
     return payload
+
+
+SNAP_STAMP_RE = re.compile(r"^(?:_run_)?(\d{8})T\d{6}Z")
+
+
+def prune_raw_snapshots(raw_dir: Path | None = None, days: int = RETENTION_DAYS,
+                        now: datetime | None = None) -> int:
+    """Retention law (RENT.md, LEGAL_RISK.md R6): raw snapshots older than the
+    window are deleted; the newest snapshot of every source (and the newest
+    run log) always survives, so offline rebuilds keep working. Fail-soft:
+    a pruning problem never fails the ingest."""
+    raw_dir = Path(raw_dir) if raw_dir is not None else RAW_DIR
+    now = now or utc_now()
+    cutoff = (now - timedelta(days=days)).strftime("%Y%m%d")
+    removed = 0
+
+    def prune_group(files: list[Path]) -> None:
+        nonlocal removed
+        for path in files[:-1]:  # the newest snapshot always survives
+            m = SNAP_STAMP_RE.match(path.name)
+            if m and m.group(1) < cutoff:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+
+    try:
+        entries = sorted(raw_dir.iterdir())
+        prune_group([p for p in entries if p.is_file() and SNAP_STAMP_RE.match(p.name)])
+        for child in entries:
+            if child.is_dir() and not child.name.startswith(("_bodies", ".")):
+                prune_group([p for p in sorted(child.iterdir())
+                             if p.is_file() and SNAP_STAMP_RE.match(p.name)])
+    except OSError:
+        return removed
+    return removed
 
 
 def main() -> int:
@@ -558,11 +702,13 @@ def main() -> int:
             print(f"    FAIL {slim['error']}")
     stamp = fetched_at.strftime("%Y%m%dT%H%M%SZ")
     run_path = RAW_DIR / f"_run_{stamp}.json"
+    run["pruned_snapshots"] = prune_raw_snapshots(now=fetched_at)
     run_path.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
     ok_n = sum(1 for r in run["results"] if r["ok"])
     items_n = sum(r.get("item_count") or 0 for r in run["results"])
     print(f"run log: {run_path.relative_to(ROOT)}")
-    print(f"done: {ok_n}/{len(sources)} feeds ok, {items_n} items")
+    tail = f", pruned {run['pruned_snapshots']} old snapshots" if run["pruned_snapshots"] else ""
+    print(f"done: {ok_n}/{len(sources)} feeds ok, {items_n} items{tail}")
     return 0 if ok_n > 0 else 1
 
 

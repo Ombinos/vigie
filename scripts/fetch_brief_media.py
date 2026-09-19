@@ -59,9 +59,13 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import fetch_media  # noqa: E402  (fetch_html, extract_og, safe_image_url, USER_AGENT, TIMEOUT)
+import fetch_media  # noqa: E402  (fetch_html, extract_og, safe_image_url, TIMEOUT)
 import resident_brief as brief  # noqa: E402  (safe_url - identity must match the renderer)
-from ingest_rss import MAX_FEED_BYTES, public_http_url, public_opener  # noqa: E402
+from ingest_rss import (  # noqa: E402
+    MAX_FEED_BYTES, public_http_url, public_opener,
+    choose_user_agent, mark_browser_identity, USER_AGENT, FALLBACK_USER_AGENT,
+)
+import ingest_rss  # noqa: E402  (_item_credit - one attribution parser, one law)
 
 RANKED = ROOT / "data" / "normalized" / "latest_ranked.json"
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
@@ -147,8 +151,9 @@ def fetch_image(url: str, referer: str = "", *, retries: int = 2,
     except (ValueError, OSError, TypeError) as exc:
         fail("image_guard_rejected", f"{type(exc).__name__}: {exc}")
         return None
+    ua = choose_user_agent(url)
     headers = {
-        "User-Agent": fetch_media.USER_AGENT,
+        "User-Agent": ua,
         "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
     }
     if referer:
@@ -173,10 +178,16 @@ def fetch_image(url: str, referer: str = "", *, retries: int = 2,
             last = (fetch_media._classify_http_error(exc.code, "image"), f"HTTP {exc.code}")
             if attempt + 1 < attempts:
                 time.sleep(0.35 * (attempt + 1))
-            continue
+            continue  # an HTTP refusal is respected - never identity-switched
         except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
             reason = "image_timeout" if fetch_media._is_timeout(exc) else "image_network_error"
             last = (reason, f"{type(exc).__name__}: {exc}")
+            if ua == USER_AGENT:
+                # Transport-level stall of the honest identity: mark the host
+                # and continue under the disclosed browser identity.
+                mark_browser_identity(url, type(exc).__name__)
+                ua = FALLBACK_USER_AGENT
+                headers["User-Agent"] = ua
             if attempt + 1 < attempts:
                 time.sleep(0.35 * (attempt + 1))
             continue
@@ -250,11 +261,14 @@ def _feed_item_link(item: ET.Element) -> str | None:
     return None
 
 
-def build_feed_media_index(raw_dir: Path = RAW_DIR) -> dict[str, str]:
-    """normalized article URL -> publisher feed image URL, from the latest
-    raw XML snapshot per source. Local reads only; corrupt, oversized or
-    entity-declaring XML is skipped, never fatal."""
-    index: dict[str, str] = {}
+def build_feed_media_index(raw_dir: Path = RAW_DIR) -> dict[str, dict]:
+    """normalized article URL -> {"image", "credit"} from the latest raw XML
+    snapshot per source. `credit` is the publisher's own MRSS media:credit
+    (photographer name) when the feed gives one - rendered beside the image
+    only when the image actually came from that feed (LEGAL_RISK.md R2).
+    Local reads only; corrupt, oversized or entity-declaring XML is skipped,
+    never fatal."""
+    index: dict[str, dict] = {}
     raw_dir = Path(raw_dir)
     if not raw_dir.is_dir():
         return index
@@ -284,7 +298,8 @@ def build_feed_media_index(raw_dir: Path = RAW_DIR) -> dict[str, str]:
             if not link or not link.startswith(("https://", "http://")):
                 continue
             image = _feed_item_image(item)
-            if image and index.setdefault(_norm_url(link), image) is not None:
+            if image and index.setdefault(_norm_url(link),
+                                          {"image": image, "credit": ingest_rss._item_credit(item)}) is not None:
                 added += 1
     return index
 
@@ -477,7 +492,7 @@ def update_media(scope: list[dict], *, offline: bool = False,
     budget = 0 if offline else FETCH_CAP
     fetched = 0
     feed_resolved = 0
-    index: dict[str, str] | None = None
+    index: dict[str, dict] | None = None
     for uid, cand in scoped:
         if budget <= 0:
             break
@@ -492,7 +507,10 @@ def update_media(scope: list[dict], *, offline: bool = False,
             continue
         if index is None:
             index = build_feed_media_index(raw_root)
-        feed_img = index.get(_norm_url(url))
+        feed_hit = index.get(_norm_url(url))
+        feed_hit = feed_hit if isinstance(feed_hit, dict) else {}
+        feed_img = feed_hit.get("image")
+        feed_credit = feed_hit.get("credit")
         prev_reason = prev.get("reason") if isinstance(prev, dict) else None
         attempts = int(prev.get("attempts") or 0) if isinstance(prev, dict) else 0
         # The publisher was silent on the page itself but their own feed
@@ -539,6 +557,10 @@ def update_media(scope: list[dict], *, offline: bool = False,
                              file=name, bytes=len(raw), format=ext, attempts=attempts)
                 if source == "feed":
                     feed_resolved += 1
+                    if isinstance(feed_credit, str) and feed_credit.strip():
+                        # The photographer name the publisher attached to THIS
+                        # feed image - only honest beside a feed-sourced file.
+                        entry["credit"] = feed_credit.strip()[:120]
         else:
             reason = "no_publisher_image" if html else (diag.get("reason") or "article_fetch_failed")
             entry.update(reason=reason, last_error=diag.get("detail", ""))

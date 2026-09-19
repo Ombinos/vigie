@@ -224,21 +224,21 @@ class FeedIndex(unittest.TestCase):
     def test_rss_enclosure_and_trailing_slash_normalization(self) -> None:
         write_feed(self.raw, "src", RSS_ENCLOSURE)
         index = fbm.build_feed_media_index(self.raw)
-        self.assertEqual(index["https://news.example/a"], "https://cdn.example/feed-a.jpg")
-        self.assertEqual(index["https://news.example/c"], "https://cdn.example/c.jpg")
+        self.assertEqual(index["https://news.example/a"]["image"], "https://cdn.example/feed-a.jpg")
+        self.assertEqual(index["https://news.example/c"]["image"], "https://cdn.example/c.jpg")
         self.assertNotIn("https://news.example/pod", index)  # audio enclosure
 
     def test_mrss_content_and_thumbnail(self) -> None:
         write_feed(self.raw, "src", RSS_MRSS)
         index = fbm.build_feed_media_index(self.raw)
-        self.assertEqual(index["https://news.example/m"], "https://cdn.example/m.jpg")
-        self.assertEqual(index["https://news.example/t"], "https://cdn.example/t.jpg")
+        self.assertEqual(index["https://news.example/m"]["image"], "https://cdn.example/m.jpg")
+        self.assertEqual(index["https://news.example/t"]["image"], "https://cdn.example/t.jpg")
         self.assertNotIn("https://news.example/n", index)  # video medium
 
     def test_atom_entry_link_href(self) -> None:
         write_feed(self.raw, "src", ATOM_FEED)
         index = fbm.build_feed_media_index(self.raw)
-        self.assertEqual(index["https://news.example/atom"], "https://cdn.example/atom.jpg")
+        self.assertEqual(index["https://news.example/atom"]["image"], "https://cdn.example/atom.jpg")
 
     def test_mrss_https_namespace_variant(self) -> None:
         # Journal de Québec declares xmlns:media with the https spelling.
@@ -249,8 +249,21 @@ class FeedIndex(unittest.TestCase):
  type="image/jpeg" medium="image" width="240" height="135"/></item>
 </channel></rss>""")
         index = fbm.build_feed_media_index(self.raw)
-        self.assertEqual(index["https://news.example/j"],
+        self.assertEqual(index["https://news.example/j"]["image"],
                          "https://cdn.example/j.jpg?impolicy=crop-resize&width=1440")
+
+    def test_photographer_credit_is_captured_when_the_feed_gives_one(self) -> None:
+        write_feed(self.raw, "src", """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
+<item><link>https://news.example/credited</link>
+<media:content url="https://cdn.example/p.jpg" medium="image">
+<media:credit>Simon Séguin-Bertrand</media:credit></media:content></item>
+<item><link>https://news.example/plain</link>
+<enclosure url="https://cdn.example/q.jpg" type="image/jpeg"/></item>
+</channel></rss>""")
+        index = fbm.build_feed_media_index(self.raw)
+        self.assertEqual(index["https://news.example/credited"]["credit"], "Simon Séguin-Bertrand")
+        self.assertIsNone(index["https://news.example/plain"]["credit"])
 
     def test_corrupt_and_hostile_xml_are_skipped_not_fatal(self) -> None:
         write_feed(self.raw, "broken", "<rss><channel>")
@@ -347,6 +360,34 @@ class SentinelFlow(unittest.TestCase):
         self.assertEqual(entry["image_url"], "https://cdn.example/feed-a.jpg")
         self.assertEqual(doc["feed_resolved"], 1)
         self.assertEqual(fi.call_args[0][0], "https://cdn.example/feed-a.jpg")
+
+    def test_feed_resolved_image_carries_the_photographer_credit(self) -> None:
+        write_feed(self.raw_dir, "src", """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
+<item><link>https://news.example/a</link>
+<media:content url="https://cdn.example/feed-a.jpg" medium="image">
+<media:credit>Simon Séguin-Bertrand</media:credit></media:content></item>
+</channel></rss>""")
+        doc, _, _ = self._run(failing_html("article_http_403", "HTTP 403"),
+                              mock.Mock(return_value=(JPEG, "jpg")), None)
+        entry = doc["media"][self.uid]
+        self.assertEqual(entry["image_source"], "feed")
+        self.assertEqual(entry["credit"], "Simon Séguin-Bertrand")
+
+    def test_og_image_never_carries_a_feed_credit(self) -> None:
+        # The feed credit belongs to the feed's image; an og:image we cannot
+        # credit must never inherit a photographer name (misattribution).
+        write_feed(self.raw_dir, "src", """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel>
+<item><link>https://news.example/a</link>
+<media:content url="https://cdn.example/other.jpg" medium="image">
+<media:credit>Quelqu'un</media:credit></media:content></item>
+</channel></rss>""")
+        doc, _, _ = self._run(mock.Mock(return_value=OG_HTML),
+                              mock.Mock(return_value=(JPEG, "jpg")), None)
+        entry = doc["media"][self.uid]
+        self.assertEqual(entry["image_source"], "og:image")
+        self.assertNotIn("credit", entry)
 
     def test_silent_page_with_feed_image_uses_the_feed(self) -> None:
         write_feed(self.raw_dir, "src", RSS_ENCLOSURE)
@@ -489,7 +530,7 @@ class RendererManifests(unittest.TestCase):
         for method in ("brief-media-v1", "brief-media-v2"):
             with self.subTest(method=method):
                 doc = json.dumps({"method": method, "media": {uid: {"file": uid + ".jpg"}}})
-                self.assertEqual(self.load(doc), {uid: uid + ".jpg"})
+                self.assertEqual(self.load(doc), {uid: {"file": uid + ".jpg", "credit": None}})
         self.assertEqual(self.load('{"method": "other-v9", "media": {}}'), {})
 
 
