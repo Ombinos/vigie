@@ -99,10 +99,20 @@ adaptive variable type, persistent wayfinding, and static maps with a legend
   drawn (none is licensed here); the official map stays the reference. It
   collapses to zero HTML without usable coordinates and never reaches the hero.
 
+### Cross-source reading (shipped)
+
+- **Voice roster** (v0.2): every followed institution in one scannable list —
+  spoke (with its usable article count and an official mark) and quiet,
+  including media silence the official-only block does not name. Absence stays
+  an absence; grouping stays a rapprochement, never a contradiction.
+- **Collection timeline** (v0.2): a collapsed per-dossier timeline of the
+  editions Vigie recorded (sources / articles / official voices), labelled
+  counters — not escalation; an absent edition is not a resolution.
+
 ### Roadmap (designed, not shipped)
 
-- **Dossier voice matrix**: institutions × (spoke / silent / unit) at a glance.
-- **Dossier timeline**: field-level revisions, not only collection presence.
+- **Field-level revisions**: question / label changes over time, not only counters.
+- **Saved corridors**: explicit, opt-in places for the daily-mobility experiment.
 
 ## Decision log
 
@@ -116,3 +126,4 @@ adaptive variable type, persistent wayfinding, and static maps with a legend
 | 2026-09-19 | Brief front-end v0.2: answer-first digest, self-hosted variable type, dark/contrast adaptation, sticky masthead + Ctrl/⌘-K palette, on-device continuity; no external font request on any surface | Bucky + Inventor |
 | 2026-09-19 | Roadworks stays out of hero and masthead; one quiet digest jump link is allowed (regression renamed to check the masthead only) | Bucky + Inventor |
 | 2026-09-19 | Phase E spatial reading: store carries each event's first official vertex; the brief draws a static self-hosted dot-density scheme with legend and scale, no basemap, no geographic-proof claim | Bucky + Inventor |
+| 2026-09-19 | Phase F cross-source reading: per-dossier voice roster (spoke + quiet, media silence named) and a collapsed collection timeline from the durable history (counters only, no escalation) | Bucky + Inventor |

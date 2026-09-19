@@ -26,6 +26,23 @@
 .dossier-tracking{font-size:12px;line-height:1.6;color:var(--muted);margin:0 0 10px}
 .dossier-tracking time{color:var(--ink);font-weight:600}
 .dossier-units{font-size:12px;color:var(--muted);margin:8px 0 0}
+/* Voice roster: the full chambre, spoke and quiet, at a glance */
+.dossier-voices{margin:0 0 12px}
+.dv-head{font-size:var(--step--1);color:var(--muted);margin:0 0 7px}
+.dv-list{list-style:none;margin:0;padding:0;display:grid;gap:3px}
+.dv-row{display:grid;grid-template-columns:158px 1fr;gap:10px;align-items:baseline;font-size:var(--step--1);padding:3px 0}
+.dv-inst{font-weight:600;color:var(--ink)}
+.dv-state{color:var(--muted)}
+.dv-kind{font-size:var(--step--2);font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--blue);margin-right:6px}
+.dv-quiet .dv-inst{font-weight:500;color:var(--muted)}
+.dv-quiet .dv-state:before{content:"— ";color:var(--line)}
+@media(max-width:600px){.dv-row{grid-template-columns:1fr;gap:2px}}
+/* Field-level timeline across editions */
+.dossier-timeline{border-bottom:1px solid var(--line);padding:8px 0;font-size:var(--step--1)}
+.dossier-timeline summary{cursor:pointer;color:var(--accent);min-height:24px}
+.dossier-timeline ul{list-style:none;margin:8px 0 4px;padding:0;display:grid;gap:4px}
+.dossier-timeline li{color:var(--muted)}
+.dossier-timeline time{color:var(--ink);font-variant-numeric:tabular-nums}
 .dossier .unit{display:inline-block;background:var(--light);color:var(--accent);border-radius:3px;padding:3px 8px;font-size:11px;font-weight:600;margin:0 6px 4px 0}
 @media(max-width:600px){.dossiers{padding-top:26px}.dossier-q{font-size:21px}.dossier-sources li{grid-template-columns:1fr;gap:3px}.dossier-inst{margin-top:4px}.dossiers-intro{font-size:12px}}
 @media print{.dossier-sources a:after{content:' (' attr(href) ')';font:9px var(--sans);overflow-wrap:anywhere}}

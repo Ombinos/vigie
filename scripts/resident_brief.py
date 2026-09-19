@@ -313,6 +313,101 @@ def tracking_html(issue: dict) -> str:
     return f'<p class="dossier-tracking fine">{text}</p>'
 
 
+def dossier_timeline_html(issue: dict) -> str:
+    """Field-level collection counters across editions (progressive disclosure).
+
+    A count is a collection fact: growth is never escalation, and an edition the
+    dossier missed is an absence, not a resolution. Renders only with two or more
+    recorded editions, so a first edition stays quiet.
+    """
+    tracking = issue.get("tracking") if isinstance(issue.get("tracking"), dict) else {}
+    timeline = tracking.get("timeline") if isinstance(tracking.get("timeline"), list) else []
+    rows = [t for t in timeline if isinstance(t, dict) and t.get("ts")]
+    if len(rows) < 2:
+        return ""
+    entries = []
+    for entry in rows[-5:]:
+        sources = safe_int(entry.get("sources"))
+        bits = [f'{sources} source{"s" if sources != 1 else ""}']
+        if "items" in entry:
+            items = safe_int(entry.get("items"))
+            bits.append(f'{items} article{"s" if items != 1 else ""}')
+        if "official" in entry and safe_int(entry.get("official")):
+            official = safe_int(entry.get("official"))
+            bits.append(f'{official} source{"s" if official != 1 else ""} '
+                        f'officielle{"s" if official != 1 else ""}')
+        when = date_html(entry.get("ts"), fallback="date non précisée")
+        entries.append(f'<li>{when} — {" · ".join(bits)}</li>')
+    return (
+        '<details class="dossier-timeline"><summary>Repères de collecte '
+        f'({len(rows)} éditions)</summary><ul>{"".join(entries)}</ul>'
+        '<p class="fine">Compteurs de collecte, pas une escalade. Une absence '
+        "d’une édition n’est pas une résolution.</p></details>"
+    )
+
+
+def dossier_voices_html(issue: dict) -> str:
+    """The full chambre at a glance: every followed institution and its state.
+
+    Spoke institutions first (with their usable article count), then the quiet
+    ones — including media silence the official-only block does not name. A
+    rapprochement is never a contradiction; absence is never proven editorial
+    silence; several media are never several independent confirmations.
+    """
+    issue = issue if isinstance(issue, dict) else {}
+    tensions = [t for t in (issue.get("tensions") or []) if isinstance(t, dict)]
+    silence = issue.get("silence") if isinstance(issue.get("silence"), dict) else {}
+    rows: list[str] = []
+    spoke_names: list[str] = []
+    for tension in tensions:
+        name = str(tension.get("institution_name") or tension.get("source_name") or "").strip()
+        if not name or name in spoke_names:
+            continue
+        spoke_names.append(name)
+        kind = str(tension.get("source_kind") or tension.get("kind") or "").lower()
+        chip = '<span class="dv-kind">officiel</span>' if kind == "official" else ""
+        usable = [
+            it for it in (tension.get("items") or [])
+            if isinstance(it, dict) and safe_url(it.get("url"))
+        ]
+        count = len(usable)
+        state = f'a parlé · {count} article{"s" if count != 1 else ""}' if count else "a parlé"
+        rows.append(
+            f'<li class="dv-row dv-spoke">{chip}<span class="dv-inst">{esc(name)}</span>'
+            f'<span class="dv-state">{state}</span></li>'
+        )
+    quiet: list[str] = []
+    for entry in (silence.get("silent") or []):
+        if not isinstance(entry, dict):
+            continue
+        name = str(
+            entry.get("institution_name") or entry.get("source_name") or entry.get("source_id") or ""
+        ).strip()
+        if name and name not in spoke_names and name not in quiet:
+            quiet.append(name)
+    quiet.sort(key=lambda value: value.casefold())
+    for name in quiet:
+        rows.append(
+            f'<li class="dv-row dv-quiet"><span class="dv-inst">{esc(name)}</span>'
+            '<span class="dv-state">n’a pas parlé dans cette collecte</span></li>'
+        )
+    if not rows:
+        return ""
+    n_spoke, n_quiet = len(spoke_names), len(quiet)
+    head = (
+        f'{n_spoke} institution{"s" if n_spoke != 1 else ""} '
+        f'{"ont" if n_spoke != 1 else "a"} parlé · '
+        f'{n_quiet} n’{"ont" if n_quiet != 1 else "a"} pas parlé'
+    )
+    return (
+        '<div class="dossier-voices">'
+        f'<p class="dv-head">{head}</p>'
+        f'<ul class="dv-list">{"".join(rows)}</ul>'
+        '<p class="fine">Toutes les institutions suivies. Une absence dans nos flux '
+        "n’est pas un silence éditorial prouvé, et ce n’est pas un indicateur de biais.</p></div>"
+    )
+
+
 def dossier_html(issue: dict, eligible: dict, edge_streets: dict | None = None,
                  edge_issues: dict | None = None) -> str:
     """One dossier: the question, who spoke, who stayed silent, sources to compare.
@@ -325,12 +420,11 @@ def dossier_html(issue: dict, eligible: dict, edge_streets: dict | None = None,
     question = esc(issue.get("question") or "Sujet suivi")
     nest = dossier_nest(issue.get("geo_focus"))
     tensions = [t for t in (issue.get("tensions") or []) if isinstance(t, dict)]
-    spoke: list[str] = []
-    for tension in tensions:
-        name = str(tension.get("institution_name") or "").strip()
-        if name and name not in spoke:
-            spoke.append(name)
-    spoke_count = safe_int(issue.get("source_count"), len(spoke))
+    spoke_names = {
+        str(t.get("institution_name") or t.get("source_name") or "").strip() for t in tensions
+    }
+    spoke_names.discard("")
+    spoke_count = safe_int(issue.get("source_count"), len(spoke_names))
     bits: list[str] = []
     for tension in tensions:
         inst = esc(str(tension.get("institution_name") or "Source").strip())
@@ -346,11 +440,6 @@ def dossier_html(issue: dict, eligible: dict, edge_streets: dict | None = None,
                 f'<span class="arrow" aria-hidden="true"> ↗</span></a></li>'
             )
     sources = f'<ul class="dossier-sources">{"".join(bits)}</ul>' if bits else ""
-    spoke_line = (
-        f'<p class="dossier-spoke"><strong>{spoke_count}</strong> sources ont parlé : '
-        + " · ".join(esc(n) for n in spoke[:5])
-        + "</p>"
-    ) if spoke else ""
     silence = issue.get("silence") or {}
     if not isinstance(silence, dict):
         silence = {}
@@ -384,7 +473,8 @@ def dossier_html(issue: dict, eligible: dict, edge_streets: dict | None = None,
         f'<div class="dossier-head"><span class="dossier-nest">{esc(NEST_LABELS[nest])}</span>'
         f'<span class="dossier-count">{spoke_count} sources · rapprochement proposé</span></div>'
         f'<h3 class="dossier-q">{question}</h3>'
-        f"{tracking_html(issue)}{spoke_line}{sources}{silence_line}{remix_line}{units_line}{edge_line}"
+        f"{tracking_html(issue)}{dossier_timeline_html(issue)}{dossier_voices_html(issue)}"
+        f"{sources}{silence_line}{remix_line}{units_line}{edge_line}"
         f"</article>"
     )
 

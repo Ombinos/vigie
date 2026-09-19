@@ -14,6 +14,7 @@ from pathlib import Path
 
 import harness
 
+import dossier_history
 import ingest_wzdx
 import resident_brief as brief
 
@@ -184,6 +185,69 @@ class SpatialSketch(unittest.TestCase):
         event, reason = ingest_wzdx.parse_event(feature)
         self.assertIsNone(reason)
         self.assertEqual(event["point"], [-71.21, 46.81])
+
+
+class DossierVoicesAndTimeline(unittest.TestCase):
+    """Phase F: the full chambre at a glance, and collection counters over time."""
+
+    def _issue(self) -> dict:
+        return {
+            "tensions": [
+                {"institution_name": "Le Soleil", "source_kind": "media",
+                 "items": [{"title": "A", "url": "https://a.example/x"},
+                           {"title": "B", "url": "javascript:alert(1)"}]},
+                {"institution_name": "Ville de Québec", "source_kind": "official",
+                 "items": [{"title": "C", "url": "https://v.example/y"}]},
+            ],
+            "silence": {"silent": [
+                {"institution_name": "Le Devoir", "source_kind": "media"},
+                {"institution_name": "Hydro-Québec", "source_kind": "official"},
+            ]},
+        }
+
+    def test_roster_names_every_institution_and_its_state(self) -> None:
+        html = brief.dossier_voices_html(self._issue())
+        for name in ("Le Soleil", "Ville de Québec", "Le Devoir", "Hydro-Québec"):
+            self.assertIn(name, html)
+        self.assertIn("officiel", html)
+        self.assertIn("2 institutions ont parlé", html)
+        self.assertIn("2 n’ont pas parlé", html)
+        self.assertIn("1 article", html)  # the javascript: item is not counted
+        self.assertIn("n’a pas parlé dans cette collecte", html)
+
+    def test_roster_escapes_and_is_deterministic(self) -> None:
+        evil = {
+            "tensions": [{"institution_name": "<img src=x>", "items": []}],
+            "silence": {"silent": [{"institution_name": "<b>x</b>"}]},
+        }
+        html = brief.dossier_voices_html(evil)
+        self.assertNotIn("<img src=x>", html)
+        self.assertNotIn("<b>x</b>", html)
+        self.assertEqual(html, brief.dossier_voices_html(evil))
+
+    def test_timeline_needs_two_editions_and_speaks_honestly(self) -> None:
+        one = {"tracking": {"timeline": [{"ts": "2026-09-19T00:00:00+00:00", "sources": 2}]}}
+        self.assertEqual(brief.dossier_timeline_html(one), "")
+        two = {"tracking": {"timeline": [
+            {"ts": "2026-09-18T00:00:00+00:00", "sources": 2, "items": 4, "official": 0},
+            {"ts": "2026-09-19T00:00:00+00:00", "sources": 3, "items": 6, "official": 1},
+        ]}}
+        html = brief.dossier_timeline_html(two)
+        self.assertIn("2 éditions", html)
+        self.assertIn("3 sources", html)
+        self.assertIn("6 articles", html)
+        self.assertIn("1 source officielle", html)
+        self.assertIn("pas une escalade", html)
+        self.assertIn("pas une résolution", html)
+
+    def test_tracking_exposes_only_fields_the_record_carried(self) -> None:
+        history = {"dossiers": {"a": {"editions_seen": 2, "timeline": [
+            {"ts": "t1", "sources": 2},
+            {"ts": "t2", "sources": 3, "items": 5, "official": 1},
+        ]}}}
+        timeline = dossier_history.tracking_of(history, "a")["timeline"]
+        self.assertEqual(timeline[0], {"ts": "t1", "sources": 2})
+        self.assertEqual(timeline[1], {"ts": "t2", "sources": 3, "items": 5, "official": 1})
 
 
 if __name__ == "__main__":

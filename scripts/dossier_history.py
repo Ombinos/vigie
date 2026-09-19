@@ -135,6 +135,8 @@ def update_history(history: dict, issues: list[dict], edition_ts: str) -> dict:
         entry = {
             "ts": edition_ts,
             "sources": _safe_int(issue.get("source_count")),
+            "items": _safe_int(issue.get("item_count")),
+            "official": _safe_int(issue.get("official_voice_count")),
         }
         rec = dossiers.get(iid)
         if rec is None:
@@ -195,6 +197,18 @@ def tracking_of(history: dict, issue_id: str) -> dict | None:
     rec = (history.get("dossiers") or {}).get(str(issue_id))
     if not isinstance(rec, dict):
         return None
+    timeline = rec.get("timeline") if isinstance(rec.get("timeline"), list) else []
+    compact = []
+    for entry in timeline:
+        if not isinstance(entry, dict) or not entry.get("ts"):
+            continue
+        row = {"ts": entry.get("ts"), "sources": _safe_int(entry.get("sources"))}
+        # Only fields the record actually carried: a pre-v0.2 entry has no
+        # items/official, and rendering a fabricated 0 would be a lie.
+        for key in ("items", "official"):
+            if key in entry:
+                row[key] = _safe_int(entry.get(key))
+        compact.append(row)
     return {
         "status": "proposed",
         "method": METHOD,
@@ -202,4 +216,5 @@ def tracking_of(history: dict, issue_id: str) -> dict | None:
         "last_seen": rec.get("last_seen"),
         "editions_seen": _safe_int(rec.get("editions_seen")),
         "editions_missed": _safe_int(rec.get("editions_missed")),
+        "timeline": compact[-8:],
     }
