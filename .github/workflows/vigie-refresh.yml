@@ -16,7 +16,12 @@ name: Vigie refresh
 on:
   schedule:
     - cron: "17 */6 * * *"   # 00:17, 06:17, 12:17, 18:17 UTC
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy to production (uncheck to validate the chain without Vercel)"
+        type: boolean
+        default: true
 
 concurrency:
   group: vigie-refresh
@@ -61,7 +66,12 @@ jobs:
         run: npm install --global vercel@latest
 
       - name: Refresh (collect -> verify -> stage -> deploy)
-        run: python3 -X utf8 scripts/refresh.py
+        run: |
+          if [ "${{ inputs.deploy }}" = "false" ]; then
+            python3 -X utf8 scripts/refresh.py --no-deploy
+          else
+            python3 -X utf8 scripts/refresh.py
+          fi
 
       - name: Persist cross-edition state
         if: always()
