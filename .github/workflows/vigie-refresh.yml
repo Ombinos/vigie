@@ -1,0 +1,75 @@
+name: Vigie refresh
+
+# The collector runs here, not on a laptop. GitHub Actions is the free scheduler
+# and runner; Vercel stays the host. Cross-edition memory travels as one tarball
+# in the PRIVATE Ombinos/vigie-state repo (release asset), because the public
+# repo must never carry publisher content.
+#
+# Required repository secrets:
+#   VERCEL_TOKEN  Vercel token with access to the deemto team / vigie project
+#   STATE_TOKEN   fine-grained PAT with contents:write on Ombinos/vigie-state
+#
+# Note: GitHub disables scheduled workflows after ~60 days of repository
+# inactivity; a normal commit restores them. Vercel's git auto-deploy is
+# disabled in vercel.json, so this workflow is the only production writer.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"   # 00:17, 06:17, 12:17, 18:17 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: vigie-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      GH_TOKEN: ${{ secrets.STATE_TOKEN }}
+      STATE_REPO: Ombinos/vigie-state
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node (vercel CLI + JS syntax checks)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Restore cross-edition state
+        run: |
+          mkdir -p "$RUNNER_TEMP/state"
+          if gh release download state --repo "$STATE_REPO" \
+               --pattern state.tar.gz --dir "$RUNNER_TEMP/state" --clobber; then
+            python3 -X utf8 scripts/state_pack.py unpack "$RUNNER_TEMP/state/state.tar.gz"
+          else
+            echo "No state yet (first run) - starting a fresh memory."
+          fi
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Refresh (collect -> verify -> stage -> deploy)
+        run: python3 -X utf8 scripts/refresh.py
+
+      - name: Persist cross-edition state
+        if: always()
+        run: |
+          python3 -X utf8 scripts/state_pack.py pack "$RUNNER_TEMP/state/state.tar.gz"
+          gh release view state --repo "$STATE_REPO" >/dev/null 2>&1 \
+            || gh release create state --repo "$STATE_REPO" \
+                 --title "Vigie state" \
+                 --notes "Rolling snapshot of the cross-edition state (private; publisher content never enters the public repo)."
+          gh release upload state "$RUNNER_TEMP/state/state.tar.gz" \
+            --repo "$STATE_REPO" --clobber

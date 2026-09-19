@@ -6,6 +6,23 @@ HTML, Python 3.12+ **stdlib only** (no pip, no SaaS). Read `VISION.md`,
 The non-commercial vow, author/image attribution (R1/R2), never-rewrite (R8),
 no-circumvention (R9) and same-day opt-out (R10) are permanent house law.
 
+## Where collection runs
+
+The collector is **not** a laptop. `.github/workflows/vigie-refresh.yml` runs every
+6 hours: it restores the cross-edition state tarball from the **private**
+`Ombinos/vigie-state` repo (`scripts/state_pack.py unpack`), runs
+`scripts/refresh.py` (pipeline → verify → stage → `vercel deploy --prod`), and
+persists the state back (`state_pack.py pack`, uploaded as the `state` release
+asset). Secrets: `VERCEL_TOKEN` and `STATE_TOKEN` (contents:write on
+`vigie-state`). Vercel git auto-deploy is disabled on purpose — this chain is the
+only production writer; a bare `git push` must never publish a data-less build.
+The public repo never carries publisher content; `data/` stays gitignored and
+only the private state store holds it. The Windows scheduled task remains an
+optional fallback and runs the same `refresh.py`.
+
+When `data/` is needed locally, seed it by unpacking the private state tarball;
+never commit it.
+
 ## Commands (from the repo root)
 
 ```text
