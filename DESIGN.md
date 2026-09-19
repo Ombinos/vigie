@@ -109,10 +109,17 @@ adaptive variable type, persistent wayfinding, and static maps with a legend
   editions Vigie recorded (sources / articles / official voices), labelled
   counters — not escalation; an absent edition is not a resolution.
 
+### Corridors (shipped)
+
+- **Saved corridors** (v0.2): the reader follows up to twelve declared street
+  names; Vigie marks the displayed declarations that literally name them and
+  counts them across the whole active collection (via a small street index
+  island). On-device only (`vigie.corridors.v1`), no geolocation, no computed
+  route effect, no server round-trip. A shared name is never geographic proof.
+
 ### Roadmap (designed, not shipped)
 
 - **Field-level revisions**: question / label changes over time, not only counters.
-- **Saved corridors**: explicit, opt-in places for the daily-mobility experiment.
 
 ## Decision log
 
@@ -127,3 +134,4 @@ adaptive variable type, persistent wayfinding, and static maps with a legend
 | 2026-09-19 | Roadworks stays out of hero and masthead; one quiet digest jump link is allowed (regression renamed to check the masthead only) | Bucky + Inventor |
 | 2026-09-19 | Phase E spatial reading: store carries each event's first official vertex; the brief draws a static self-hosted dot-density scheme with legend and scale, no basemap, no geographic-proof claim | Bucky + Inventor |
 | 2026-09-19 | Phase F cross-source reading: per-dossier voice roster (spoke + quiet, media silence named) and a collapsed collection timeline from the durable history (counters only, no escalation) | Bucky + Inventor |
+| 2026-09-19 | Saved corridors: opt-in declared street names, literal match, on-device only, no geolocation and no route effect; the street index island counts over every active event | Bucky + Inventor |

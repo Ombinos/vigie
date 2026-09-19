@@ -250,5 +250,50 @@ class DossierVoicesAndTimeline(unittest.TestCase):
         self.assertEqual(timeline[1], {"ts": "t2", "sources": 3, "items": 5, "official": 1})
 
 
+class SavedCorridors(unittest.TestCase):
+    """Last roadmap item: opt-in corridors, on-device, literal street match."""
+
+    def test_street_rows_count_folded_literals(self) -> None:
+        events = [
+            {"event_id": "a", "road_names": ["Rue Saint-Jean", "Boulevard René-Lévesque O"]},
+            {"event_id": "b", "road_names": ["rue saint-jean"]},
+            {"event_id": "c", "road_names": ["   "]},
+            {"event_id": "d"},
+            None,
+        ]
+        rows = brief._rw_street_rows(events)
+        by_key = {row["key"]: row for row in rows}
+        self.assertEqual(by_key["rue saint-jean"]["n"], 2)
+        self.assertEqual(by_key["boulevard rene-levesque o"]["n"], 1)
+        self.assertNotIn("", by_key)
+        self.assertEqual(rows[0]["key"], "rue saint-jean")  # highest count first
+
+    def test_corridors_markup_and_island(self) -> None:
+        html = brief._rw_corridors_html([{"name": "Rue <Test>", "key": "rue test", "n": 2}])
+        for needle in ('id="vigie-streets"', 'id="rw-corridors"', 'id="rw-corridor-input"',
+                       'id="rw-street-options"', 'id="rw-corridor-list"'):
+            self.assertIn(needle, html)
+        self.assertIn("aucune position", html)
+        self.assertNotIn("http", html)
+        raw = html[: html.index("</script>")]
+        self.assertNotIn("<Test>", raw)  # neutralized inside the JSON island
+        island = json.loads(raw[raw.index(">") + 1:])
+        self.assertEqual(island["method"], "rw-streets-v1")
+        self.assertEqual(island["streets"][0]["n"], 2)
+
+    def test_corridors_collapse_without_streets(self) -> None:
+        self.assertEqual(brief._rw_corridors_html([]), "")
+
+    def test_card_carries_folded_road_keys_for_marking(self) -> None:
+        card = brief._rw_card({"event_id": "e", "road_names": ["Rue Saint-Jean"]}, set(), {}, False)
+        self.assertIn('data-roads="rue saint-jean"', card)
+
+    def test_client_stays_on_device_and_literal(self) -> None:
+        js = (ROOT / "public" / "assets" / "brief.js").read_text(encoding="utf-8")
+        for needle in ("vigie.corridors.v1", "rw-corridor-add", "dataset.roads", "rw-hit"):
+            self.assertIn(needle, js)
+        self.assertNotIn("geolocation", js)
+
+
 if __name__ == "__main__":
     unittest.main()

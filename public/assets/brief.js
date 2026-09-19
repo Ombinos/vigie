@@ -159,7 +159,7 @@
   });
   on($('#clear-local'), 'click', () => {
     let cleared = true;
-    try { [KEY, 'vigie_facets_v1', 'vigie_visit_v1'].forEach(k => localStorage.removeItem(k)); } catch { cleared = false; }
+    try { [KEY, 'vigie_facets_v1', 'vigie_visit_v1', 'vigie.corridors.v1'].forEach(k => localStorage.removeItem(k)); } catch { cleared = false; }
     state = { saved: [], seen: null, visited: null }; syncSets(); reset();
     const ps = $('#privacy-status');
     if (ps) ps.textContent = cleared ? 'Vos repères Vigie ont été effacés de cet appareil.' : 'L’accès au stockage est bloqué. Les repères de cette visite ont été effacés.';
@@ -275,6 +275,95 @@
       });
     }, { rootMargin: '-45% 0px -50% 0px' });
     spyIds.map(id => document.getElementById(id)).filter(Boolean).forEach(node => spy.observe(node));
+  }
+  // Saved corridors (Travaux): opt-in, on-device, literal street matching only.
+  const CKEY = 'vigie.corridors.v1';
+  const corridorBox = $('#rw-corridors');
+  if (corridorBox) {
+    const island = $('#vigie-streets');
+    const byKey = new Map();
+    const names = [];
+    try {
+      const doc = JSON.parse(island ? island.textContent : 'null');
+      const rows = doc && Array.isArray(doc.streets) ? doc.streets : [];
+      rows.forEach(r => {
+        if (r && typeof r.key === 'string' && typeof r.name === 'string') {
+          byKey.set(r.key, { name: r.name, n: Number(r.n) || 0 });
+          names.push(r.name);
+        }
+      });
+    } catch { /* unreadable island: the control stays unavailable */ }
+    if (byKey.size) {
+      const input = $('#rw-corridor-input'), addBtn = $('#rw-corridor-add');
+      const list = $('#rw-corridor-list'), status = $('#rw-corridor-status');
+      const datalist = $('#rw-street-options');
+      if (datalist) {
+        names.slice(0, 400).forEach(name => {
+          const opt = document.createElement('option'); opt.value = name; datalist.appendChild(opt);
+        });
+      }
+      let corridors = [];
+      try {
+        const raw = JSON.parse(localStorage.getItem(CKEY) || '[]');
+        corridors = Array.isArray(raw)
+          ? [...new Set(raw.filter(x => typeof x === 'string' && x.trim()))].slice(0, 12)
+          : [];
+      } catch { corridors = []; }
+      const keyOf = name => fold(name).replace(/\s+/g, ' ').trim();
+      const persist = () => { try { localStorage.setItem(CKEY, JSON.stringify(corridors)); } catch { /* ignore */ } };
+      const mark = () => {
+        const keys = new Set(corridors.map(keyOf));
+        all('#travaux .rw-item').forEach(item => {
+          const roads = String(item.dataset.roads || '').split(' ').filter(Boolean);
+          item.classList.toggle('rw-hit', keys.size > 0 && roads.some(r => keys.has(r)));
+        });
+      };
+      const draw = () => {
+        corridorBox.hidden = false;
+        list.textContent = '';
+        corridors.forEach((name, i) => {
+          const hit = byKey.get(keyOf(name));
+          const n = hit ? hit.n : 0;
+          const li = document.createElement('li');
+          li.className = 'rw-corridor';
+          const label = document.createElement('span'); label.className = 'rw-corridor-name'; label.textContent = name;
+          const count = document.createElement('span'); count.className = 'rw-corridor-count';
+          count.textContent = n === 0
+            ? 'aucune entrave déclarée dans cette collecte'
+            : n + ' entrave' + (n !== 1 ? 's' : '') + ' déclarée' + (n !== 1 ? 's' : '');
+          const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'rw-corridor-remove';
+          rm.textContent = 'Retirer'; rm.setAttribute('aria-label', 'Retirer ' + name);
+          rm.addEventListener('click', () => { corridors.splice(i, 1); persist(); draw(); });
+          li.append(label, count, rm);
+          list.appendChild(li);
+        });
+        if (status) {
+          status.textContent = corridors.length
+            ? 'Correspondance littérale sur le nom déclaré. Sur cet appareil seulement.'
+            : 'Aucun corridor suivi. Les rues proposées sont celles déclarées par la Ville.';
+        }
+        mark();
+      };
+      const add = () => {
+        const raw = (input && input.value || '').trim();
+        if (!raw) return;
+        const key = keyOf(raw);
+        if (!byKey.has(key)) {
+          if (status) status.textContent = 'Cette rue n’est pas déclarée dans la collecte actuelle.';
+          return;
+        }
+        const display = byKey.get(key).name;
+        if (!corridors.some(c => keyOf(c) === key)) {
+          if (corridors.length >= 12) { if (status) status.textContent = 'Douze corridors au maximum.'; return; }
+          corridors.push(display); persist();
+        }
+        if (input) input.value = '';
+        draw();
+      };
+      if (addBtn) on(addBtn, 'click', add);
+      on(input, 'keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+      draw();
+    }
   }
   // Reveal controls first, then render: a missing shell element in a future
   // edition must leave the static article reading intact, never a dead page.

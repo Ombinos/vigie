@@ -633,6 +633,7 @@ RW_SEVERITY = {
     "all-lanes-open": 4, "no-lanes-closed": 5,
 }
 RW_DISPLAY_CAP = 8
+RW_STREET_INDEX_CAP = 400
 RW_MAP_URL = "https://carte.ville.quebec.qc.ca/"
 
 # Sidecar stores (edge-atlas-v1 / anomaly-beacon-v1). A foreign, corrupt or
@@ -821,6 +822,12 @@ def _rw_history_line(event: dict, history: dict) -> str:
     return f'<p class="rw-history fine">{text}</p>'
 
 
+def _street_key(raw: object) -> str:
+    """Folded literal street key shared with the client and the atlas: a shared
+    name is a match, never geographic proof."""
+    return folded(plain(str(raw or "")))
+
+
 def _rw_card(event: dict, new_ids: set, changed_by_id: dict, has_previous: bool,
              history: dict | None = None, edge_streets: dict | None = None) -> str:
     eid = str(event.get("event_id"))
@@ -854,8 +861,11 @@ def _rw_card(event: dict, new_ids: set, changed_by_id: dict, has_previous: bool,
     if len(desc) > 200:
         desc = desc[:200].rsplit(" ", 1)[0] + "…"
     desc_html = f'<p class="rw-desc">{esc(desc)}</p>' if desc else ""
+    road_keys = " ".join(
+        key for key in (_street_key(raw) for raw in (event.get("road_names") or [])[:6]) if key
+    )
     return (
-        f'<li class="rw-item rw-sev-{severity}">'
+        f'<li class="rw-item rw-sev-{severity}" data-roads="{esc(road_keys)}">'
         f'<div class="rw-head">{tags}<span class="rw-roads">{esc(_rw_places(event) or "Lieu non précisé")}</span></div>'
         f"{kicker_html}{_rw_dates(event)}{_rw_history_line(event, history or {})}"
         f"{rw_edge_line(event, edge_streets or {})}{desc_html}</li>"
@@ -865,6 +875,64 @@ def _rw_card(event: dict, new_ids: set, changed_by_id: dict, has_previous: bool,
 RW_SKETCH_W = 720.0
 RW_SKETCH_H = 320.0
 RW_SKETCH_PAD = 10.0
+
+
+def _rw_street_rows(events: list[dict]) -> list[dict]:
+    """Distinct declared street names with their active-obstruction count.
+
+    Derived from the official road_names only, folded for literal matching.
+    Deterministic order: count desc, then name, then key.
+    """
+    counts: dict[str, list] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        for raw in event.get("road_names") or []:
+            display = plain(str(raw or ""))
+            key = _street_key(raw)
+            if not display or not key:
+                continue
+            row = counts.get(key)
+            if row is None:
+                counts[key] = [display, 1]
+            else:
+                row[1] += 1
+    rows = [{"name": display, "key": key, "n": count} for key, (display, count) in counts.items()]
+    rows.sort(key=lambda row: (-row["n"], row["name"].casefold(), row["key"]))
+    return rows[:RW_STREET_INDEX_CAP]
+
+
+def _rw_corridors_html(rows: list[dict]) -> str:
+    """Opt-in saved corridors: on-device only, literal street matching.
+
+    No geolocation, no route effect, no server: the reader follows a declared
+    street name and Vigie marks the declarations that literally name it. The
+    index island lets the client resolve counts over every active event, not
+    only the eight displayed cards.
+    """
+    if not rows:
+        return ""
+    island = json.dumps(
+        {"method": "rw-streets-v1", "streets": rows},
+        ensure_ascii=False, separators=(",", ":"),
+    ).replace("<", "\\u003c")
+    return (
+        f'<script type="application/json" id="vigie-streets">{island}</script>'
+        '<div class="rw-corridors js-only" id="rw-corridors" hidden>'
+        '<p class="eyebrow">VOS CORRIDORS</p>'
+        '<p class="rw-corridors-note">Suivez une ou deux rues que vous empruntez souvent. '
+        "La correspondance est littérale (le nom déclaré par la Ville), sur cet appareil "
+        "seulement : aucune position demandée, aucun effet sur votre trajet calculé, et "
+        "un nom partagé n’est pas une preuve géographique.</p>"
+        '<div class="rw-corridors-add">'
+        '<label class="sr-only" for="rw-corridor-input">Ajouter une rue déclarée</label>'
+        '<input id="rw-corridor-input" type="text" list="rw-street-options" '
+        'placeholder="Une rue déclarée (ex. rue Dorchester)" autocomplete="off" maxlength="120">'
+        '<datalist id="rw-street-options"></datalist>'
+        '<button type="button" id="rw-corridor-add">Suivre</button></div>'
+        '<ul id="rw-corridor-list" class="rw-corridor-list"></ul>'
+        '<p class="fine" id="rw-corridor-status"></p></div>'
+    )
 
 
 def _rw_sketch(rw: dict, events: list[dict]) -> str:
@@ -996,6 +1064,7 @@ def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = N
     anomaly_rows = valid_anomalies(anomalies)
     beacon = anomalies_html(anomaly_rows, total=anomaly_total(anomalies, anomaly_rows))
     sketch = _rw_sketch(rw, ordered)
+    corridors = _rw_corridors_html(_rw_street_rows(ordered))
     cards = "".join(
         _rw_card(e, new_ids, changed_by_id, has_previous, history, edge_streets)
         for e in ordered[:RW_DISPLAY_CAP]
@@ -1069,7 +1138,7 @@ def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = N
         '<p class="dossiers-intro">Les entraves déclarées par la Ville dans son flux '
         "officiel en temps réel, relayées telles quelles. Vigie ne recalcule aucun "
         "effet sur votre trajet et ne classe pas ces données avec les articles.</p>"
-        f"{sketch}{changes}{beacon}{listing}{more}{stale_html}"
+        f"{sketch}{changes}{beacon}{corridors}{listing}{more}{stale_html}"
         f'<p class="rw-map"><a href="{RW_MAP_URL}" rel="noopener noreferrer">Ouvrir la carte officielle des travaux <span aria-hidden="true">↗</span></a></p>'
         f'<p class="rw-attr fine">Données : {dataset_link} (CC-BY 4.0, via Données Québec). '
         f"Collecte du {date_html(fetched.isoformat())}. Les dates marquées « estimées » "
@@ -1258,5 +1327,5 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 {change_html}
 {dossier_html}
 <section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>
-<section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><p>Les images d’aperçu proviennent des éditeurs (og:image ou média attaché à leur propre flux) : Vigie les récupère au moment de la collecte et les sert depuis ce site — votre navigateur ne contacte aucun éditeur en lisant ce point. Un article dont l’éditeur ne publie pas d’image reste sans image : aucune image n’est inventée.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
+<section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés, votre point de lecture et vos corridors restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><p>Les images d’aperçu proviennent des éditeurs (og:image ou média attaché à leur propre flux) : Vigie les récupère au moment de la collecte et les sert depuis ce site — votre navigateur ne contacte aucun éditeur en lisant ce point. Un article dont l’éditeur ne publie pas d’image reste sans image : aucune image n’est inventée.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
 <footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span><a class="legal-link" href="/legal.md">Mentions légales, attribution et retrait</a></footer><div class="cmdk js-only" id="cmdk" hidden role="dialog" aria-modal="true" aria-labelledby="cmdk-title"><div class="cmdk-panel"><h2 id="cmdk-title" class="sr-only">Recherche rapide</h2><input id="cmdk-input" class="cmdk-input" type="text" role="combobox" aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list" placeholder="Chercher un article, un lieu, une section…" autocomplete="off" maxlength="200"><ul id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Résultats"></ul><p class="cmdk-hint">Entrée pour ouvrir · Échap pour fermer · Ctrl ou ⌘ + K</p></div></div><div id="toast" role="status" aria-live="polite"></div></body></html>'''
