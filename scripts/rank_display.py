@@ -18,6 +18,8 @@ CANDIDATES = ROOT / "data" / "normalized" / "latest_candidates.json"
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
 ISSUES = ROOT / "data" / "issues" / "latest_issues.json"
 ROADWORKS = ROOT / "data" / "roadworks" / "latest_roadworks.json"
+EDGES = ROOT / "data" / "edges" / "latest_edges.json"
+ANOMALIES = ROOT / "data" / "anomalies" / "latest_verdict.json"
 FACES = ROOT / "data" / "media" / "latest_faces.json"
 OUT_JSON = ROOT / "data" / "normalized" / "latest_ranked.json"
 OUT_HTML = ROOT / "public" / "index.html"
@@ -2510,6 +2512,26 @@ def main() -> None:
         if roadworks:
             print(f"roadworks: {len(roadworks.get('events') or [])} active events from {ROADWORKS}")
 
+    # Sidecar stores compiled from the official collection: street-level joins
+    # (edge-atlas-v1) and fixed-threshold anomaly verdicts (anomaly-beacon-v1).
+    # Missing, corrupt or foreign-method stores render nothing rather than fail.
+    def _load_sidecar(path: Path) -> dict:
+        if not path.exists():
+            return {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    edges = _load_sidecar(EDGES)
+    anomalies = _load_sidecar(ANOMALIES)
+    if edges:
+        print(f"edges: {edges.get('street_count', 0)} streets, "
+              f"{edges.get('matched_issue_count', 0)} matched dossiers from {EDGES}")
+    if anomalies:
+        print(f"anomalies: {anomalies.get('anomaly_count', 0)} measured from {ANOMALIES}")
+
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
     clock = load_clock(now.isoformat())
     # Keep the experimental evidence workbench accessible without making
@@ -2520,7 +2542,8 @@ def main() -> None:
         render_html(ranked, now.isoformat(), issues, clock), encoding="utf-8"
     )
     OUT_HTML.write_text(
-        resident_brief.render_brief(ranked, now.isoformat(), issues, ledger=ledger, roadworks=roadworks),
+        resident_brief.render_brief(ranked, now.isoformat(), issues, ledger=ledger,
+                                    roadworks=roadworks, anomalies=anomalies, edges=edges),
         encoding="utf-8",
     )
     near = sum(1 for c in ranked if section_for(c) == "near")

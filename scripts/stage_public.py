@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "deploy" / "public"
-METHODS = ("VISION.md", "ranking.md", "sources.yaml", "RENT.md", "FRICTION.md", "FACETS.md", "DESIGN.md")
+METHODS = ("VISION.md", "ranking.md", "sources.yaml", "RENT.md", "FRICTION.md", "FACETS.md", "DESIGN.md", "edge.md", "anomalies.md")
 REQUIRED_ASSETS = ("index.html", "morning.html", "favicon.svg")
 ASSET_EXTENSIONS = {
     ".html", ".css", ".js", ".mjs", ".svg", ".png", ".jpg", ".jpeg",

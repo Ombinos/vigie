@@ -25,6 +25,8 @@ SCRIPTS = [
     "normalize.py",
     "enrich.py",
     "cluster_issues.py",
+    "edge_atlas.py",
+    "compile_anomalies.py",
     "fetch_brief_media.py",
     "rank_display.py",
 ]

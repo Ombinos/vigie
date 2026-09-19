@@ -50,6 +50,10 @@ All honor `prefers-reduced-motion: reduce`.
 
 Publisher `og:image` only, fetched at collection time (`scripts/fetch_brief_media.py`) and served from our own origin — reading the brief never contacts a publisher. Bytes are sniffed, never trusted: no SVG, no mislabeled HTML, 700 KB cap. A silent publisher means no image — not a filler, never stock. Same treatment for every card that has one: full-width strip, 1200/630, hairline `--line` border, `object-fit: cover`; no invented hierarchy. New articles get their image on the next refresh; the lag is honest, placeholders are not.
 
+## Structural reading (roadworks section only)
+
+The anomaly beacon (`anomalies.md`, `anomaly-beacon-v1`) and street-level joins (`edge.md`, `edge-atlas-v1`) live **inside the Travaux et entraves section** — never the first viewport, never the hero. Fixed-threshold collection facts in one quiet accent-bordered block; no red, no pulse, no alert chrome. Zero measured anomalies means the brief is byte-identical to a brief without the feature. A join always presents itself as « Rapprochement proposé … une mention textuelle, pas une preuve géographique » — never as geographic proof, never as importance.
+
 ## Decision log
 
 | Date | Decision | Owner |
@@ -58,3 +62,4 @@ Publisher `og:image` only, fetched at collection time (`scripts/fetch_brief_medi
 | 2026-09-17 | Verification: composition order; silence chrome de-purpled to slate; place/ empty; tests lock Do/Do-not | Bucky + Inventor |
 | TBD | Add full-bleed only with a real named place image in `public/place/` and a row above | Inventor |
 | 2026-09-18 | Brief preview images: publisher og:image, locally re-hosted and sniffed; never stock, never invented | Bucky + Inventor |
+| 2026-09-19 | Edge Atlas + anomaly beacon: structural reading confined to the Travaux section; hero untouched; both collapse byte-identical when empty | Bucky + Inventor |

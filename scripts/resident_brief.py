@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from ingest_rss import public_http_url
+import edge_atlas
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOW_DAYS = 7
@@ -291,7 +292,8 @@ def tracking_html(issue: dict) -> str:
     return f'<p class="dossier-tracking fine">{text}</p>'
 
 
-def dossier_html(issue: dict, eligible: dict) -> str:
+def dossier_html(issue: dict, eligible: dict, edge_streets: dict | None = None,
+                 edge_issues: dict | None = None) -> str:
     """One dossier: the question, who spoke, who stayed silent, sources to compare.
 
     Grouping is never a contradiction; absence is never proven editorial silence;
@@ -355,22 +357,24 @@ def dossier_html(issue: dict, eligible: dict) -> str:
         + "".join(f'<span class="unit">{esc(u[:48])}</span>' for u in units)
         + "</p>"
     ) if units else ""
+    edge_line = dossier_edge_line(issue.get("issue_id"), edge_streets or {}, edge_issues or {})
     return (
         f'<article class="dossier" data-nest="{esc(nest)}">'
         f'<div class="dossier-head"><span class="dossier-nest">{esc(NEST_LABELS[nest])}</span>'
         f'<span class="dossier-count">{spoke_count} sources · rapprochement proposé</span></div>'
         f'<h3 class="dossier-q">{question}</h3>'
-        f"{tracking_html(issue)}{spoke_line}{sources}{silence_line}{remix_line}{units_line}"
+        f"{tracking_html(issue)}{spoke_line}{sources}{silence_line}{remix_line}{units_line}{edge_line}"
         f"</article>"
     )
 
 
-def dossiers_section(issues: list[dict], eligible: dict) -> str:
+def dossiers_section(issues: list[dict], eligible: dict, edge_streets: dict | None = None,
+                     edge_issues: dict | None = None) -> str:
     """Cross-source dossiers on the resident front door — the lookout, in French."""
     dossiers = [iss for iss in (issues or []) if isinstance(iss, dict) and iss.get("question")]
     count = len(dossiers)
     if dossiers:
-        cards = "".join(dossier_html(iss, eligible) for iss in dossiers[:6])
+        cards = "".join(dossier_html(iss, eligible, edge_streets, edge_issues) for iss in dossiers[:6])
         label = "dossier proposé" if count == 1 else "dossiers proposés"
         if count > 6:
             note = f"{count} {label} cette édition — les 6 premiers affichés ici."
@@ -520,6 +524,129 @@ RW_SEVERITY = {
 RW_DISPLAY_CAP = 8
 RW_MAP_URL = "https://carte.ville.quebec.qc.ca/"
 
+# Sidecar stores (edge-atlas-v1 / anomaly-beacon-v1). A foreign, corrupt or
+# empty store collapses to zero HTML — the brief stays byte-identical.
+EDGES_METHOD = "edge-atlas-v1"
+ANOMALIES_METHOD = "anomaly-beacon-v1"
+ANOMALY_DISPLAY_CAP = 3
+DOSSIER_EDGE_CAP = 2
+
+
+def valid_anomalies(doc: object) -> list[dict]:
+    """Verified verdict rows. The method guard mirrors compile_anomalies."""
+    if not isinstance(doc, dict) or doc.get("method") != ANOMALIES_METHOD:
+        return []
+    rows = doc.get("anomalies")
+    if not isinstance(rows, list):
+        return []
+    out = [
+        row for row in rows
+        if isinstance(row, dict) and str(row.get("claim") or "").strip()
+    ]
+    return out[:ANOMALY_DISPLAY_CAP]
+
+
+def valid_edges(doc: object) -> tuple[dict, dict]:
+    """Verified (streets, issues) indexes. The method guard mirrors edge_atlas."""
+    if not isinstance(doc, dict) or doc.get("method") != EDGES_METHOD:
+        return {}, {}
+    streets = doc.get("streets")
+    issues = doc.get("issues")
+    streets = {
+        str(k): v for k, v in streets.items() if isinstance(v, dict)
+    } if isinstance(streets, dict) else {}
+    issues = {
+        str(k): v for k, v in issues.items() if isinstance(v, dict)
+    } if isinstance(issues, dict) else {}
+    return streets, issues
+
+
+def anomalies_html(rows: list[dict]) -> str:
+    """Structural reading of the official collection — measured facts only.
+
+    Fixed-threshold rules published in anomalies.md; no prediction, no
+    importance judgment, no alert chrome. Empty verdict, empty HTML.
+    """
+    if not rows:
+        return ""
+    items = []
+    for row in rows:
+        evidence = row.get("evidence_event_ids")
+        n = len(evidence) if isinstance(evidence, list) else 0
+        cited = (
+            f'<span class="fine">{n} entrave{"s" if n != 1 else ""} citée{"s" if n != 1 else ""}'
+            ' · <a href="/anomalies.md">comment nous mesurons</a></span>'
+        ) if n else '<span class="fine"><a href="/anomalies.md">comment nous mesurons</a></span>'
+        items.append(
+            f'<li class="rw-anomaly"><span class="rw-tag rw-t-anom">{esc(row.get("rule_label") or "Anomalie")}</span>'
+            f'<span class="rw-anomaly-claim">{esc(row.get("claim"))}</span>{cited}</li>'
+        )
+    return (
+        '<div class="rw-anomalies" id="anomalies">'
+        '<p class="eyebrow">LECTURE STRUCTURELLE</p>'
+        '<h3>Ce qui sort de l’ordinaire dans cette collecte.</h3>'
+        f'<ul class="rw-anomaly-list">{"".join(items)}</ul>'
+        '<p class="fine">Règles à seuils fixes, publiées dans anomalies.md. Une anomalie '
+        'est un fait de collecte mesuré — pas une prédiction, pas un jugement '
+        'd’importance.</p></div>'
+    )
+
+
+def rw_edge_line(event: dict, edge_streets: dict) -> str:
+    """Proposed street-level join between one obstruction and the edition's
+    dossiers. A shared street name, never geographic proof."""
+    if not edge_streets:
+        return ""
+    for raw in event.get("road_names") or []:
+        key = edge_atlas.street_key(raw)
+        info = edge_streets.get(key) if key else None
+        if not isinstance(info, dict):
+            continue
+        matched = info.get("matched_issue_ids")
+        n = len(matched) if isinstance(matched, list) else 0
+        if not n:
+            continue
+        label = "un dossier proposé" if n == 1 else f"{n} dossiers proposés"
+        return (
+            f'<p class="rw-edge fine">Rapprochement proposé : {label} de cette édition '
+            f'mentionne « {esc(info.get("display") or raw)} » — '
+            '<a href="#dossiers">voir les dossiers</a> · '
+            '<a href="/edge.md">méthode</a>. Une mention textuelle, pas une '
+            'preuve géographique.</p>'
+        )
+    return ""
+
+
+def dossier_edge_line(issue_id: object, edge_streets: dict, edge_issues: dict) -> str:
+    """Reverse join: active official obstructions on a street this dossier
+    names. Rendered only when the roadworks section exists (anchor safety)."""
+    rec = edge_issues.get(str(issue_id or ""))
+    if not isinstance(rec, dict) or not edge_streets:
+        return ""
+    keys = [
+        k for k in (rec.get("streets") or [])
+        if isinstance(edge_streets.get(k), dict)
+    ][:DOSSIER_EDGE_CAP]
+    rows = [
+        (str(edge_streets[k].get("display") or k), safe_int(edge_streets[k].get("active_count")))
+        for k in keys
+    ]
+    rows = [(display, count) for display, count in rows if display and count > 0]
+    if not rows:
+        return ""
+    parts = " ; ".join(
+        f"{count} entrave{'s' if count != 1 else ''} active{'s' if count != 1 else ''} "
+        f"sur « {esc(display)} »"
+        for display, count in rows
+    )
+    return (
+        '<p class="dossier-edge fine">Rapprochement proposé : la collecte officielle '
+        f'déclare {parts} — rue{"" if len(rows) == 1 else "s"} mentionnée{"" if len(rows) == 1 else "s"} '
+        'dans ce dossier. <a href="#travaux">Voir les entraves</a> · '
+        '<a href="/edge.md">méthode</a>. Un nom de rue partagé, pas une preuve '
+        'géographique.</p>'
+    )
+
 
 def _rw_places(event: dict) -> str:
     roads = [str(r).strip() for r in (event.get("road_names") or []) if str(r or "").strip()]
@@ -565,7 +692,7 @@ def _rw_history_line(event: dict, history: dict) -> str:
 
 
 def _rw_card(event: dict, new_ids: set, changed_by_id: dict, has_previous: bool,
-             history: dict | None = None) -> str:
+             history: dict | None = None, edge_streets: dict | None = None) -> str:
     eid = str(event.get("event_id"))
     impact = str(event.get("vehicle_impact") or "")
     severity = RW_SEVERITY.get(impact, 6)
@@ -600,17 +727,24 @@ def _rw_card(event: dict, new_ids: set, changed_by_id: dict, has_previous: bool,
     return (
         f'<li class="rw-item rw-sev-{severity}">'
         f'<div class="rw-head">{tags}<span class="rw-roads">{esc(_rw_places(event) or "Lieu non précisé")}</span></div>'
-        f"{kicker_html}{_rw_dates(event)}{_rw_history_line(event, history or {})}{desc_html}</li>"
+        f"{kicker_html}{_rw_dates(event)}{_rw_history_line(event, history or {})}"
+        f"{rw_edge_line(event, edge_streets or {})}{desc_html}</li>"
     )
 
 
-def roadworks_section(rw: dict | None, now: datetime) -> str:
+def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = None,
+                      edges: dict | None = None) -> str:
     """Official road obstructions — structured change data, never articles.
 
     Renders only when a store exists with a parseable collection timestamp, so
     the section never implies data that was not collected. Removed ≠ ended;
     estimated dates stay marked estimated; no personal-route effect is ever
     computed. Judgment stays with the reader, on the official map.
+
+    Sidecars: a verified anomaly verdict adds the structural-reading block
+    (fixed-threshold collection facts); a verified edge atlas adds proposed
+    street-level joins to the edition's dossiers. Both collapse to zero HTML
+    when absent, corrupt, foreign or empty.
     """
     rw = rw if isinstance(rw, dict) else {}
     events = rw.get("events")
@@ -638,8 +772,10 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
         and isinstance(hist_doc.get("events"), dict)
         else {}
     )
+    edge_streets, _ = valid_edges(edges)
+    beacon = anomalies_html(valid_anomalies(anomalies))
     cards = "".join(
-        _rw_card(e, new_ids, changed_by_id, has_previous, history)
+        _rw_card(e, new_ids, changed_by_id, has_previous, history, edge_streets)
         for e in ordered[:RW_DISPLAY_CAP]
     )
     count = len(ordered)
@@ -711,7 +847,7 @@ def roadworks_section(rw: dict | None, now: datetime) -> str:
         '<p class="dossiers-intro">Les entraves déclarées par la Ville dans son flux '
         "officiel en temps réel, relayées telles quelles. Vigie ne recalcule aucun "
         "effet sur votre trajet et ne classe pas ces données avec les articles.</p>"
-        f"{changes}{listing}{more}{stale_html}"
+        f"{changes}{beacon}{listing}{more}{stale_html}"
         f'<p class="rw-map"><a href="{RW_MAP_URL}" rel="noopener noreferrer">Ouvrir la carte officielle des travaux <span aria-hidden="true">↗</span></a></p>'
         f'<p class="rw-attr fine">Données : {dataset_link} (CC-BY 4.0, via Données Québec). '
         f"Collecte du {date_html(fetched.isoformat())}. Les dates marquées « estimées » "
@@ -751,9 +887,15 @@ def article_html(item: dict, index: int, related: list[dict], media: dict | None
       </div></article>'''
 
 
-def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None, roadworks: dict | None = None, media: dict | None = None) -> str:
+def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None, roadworks: dict | None = None, media: dict | None = None, anomalies: dict | None = None, edges: dict | None = None) -> str:
     now = parse_date(generated_at) or datetime.now(timezone.utc)
     rows, excluded = prepare_items(ranked, now)
+    rw_html = roadworks_section(roadworks, now, anomalies, edges)
+    edge_streets, edge_issues = valid_edges(edges)
+    if not rw_html:
+        # Anchor safety: dossier edge lines point at #travaux, which only
+        # exists when the roadworks section rendered.
+        edge_streets, edge_issues = {}, {}
     run = latest_run() if run is None else run
     if media is None:
         media = load_brief_media()
@@ -788,9 +930,9 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 <div class="results-bar"><p id="result-count" role="status">{len(rows)} articles récents dans les flux collectés</p><button class="text-button js-only" type="button" id="reset-filters">Réinitialiser les filtres</button></div><div id="stories">{stories}{empty}</div>
 <div id="no-results" class="no-data" hidden><h3>Aucun article dans cette vue.</h3><p>Essayez un autre lieu ou élargissez le territoire. Une absence dans nos flux ne signifie pas qu’il ne se passe rien.</p><button type="button" id="empty-reset">Voir le point local</button></div>
 <div class="brief-end"><p id="end-note">Vous avez fait le tour de cette sélection.</p><button class="js-only" id="show-more" type="button">Voir les autres articles</button><span class="fine">Pas de défilement infini. Revenez quand vous en avez besoin.</span></div></section>
-{roadworks_section(roadworks, now)}
+{rw_html}
 {change_section(ledger)}
-{dossiers_section(issues, eligible)}
+{dossiers_section(issues, eligible, edge_streets, edge_issues)}
 <section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>
 <section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><p>Les images d’aperçu proviennent des éditeurs (og:image) : Vigie les récupère au moment de la collecte et les sert depuis ce site — votre navigateur ne contacte aucun éditeur en lisant ce point. Un article dont l’éditeur ne publie pas d’image reste sans image : aucune image n’est inventée.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
 <footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span></footer><div id="toast" role="status" aria-live="polite"></div></body></html>'''
