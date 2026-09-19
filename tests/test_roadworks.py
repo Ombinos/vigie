@@ -474,9 +474,13 @@ class RoadworksRender(unittest.TestCase):
         self.assertLess(page.index('id="essentiel"'), page.index('id="travaux"'))
         self.assertLess(page.index('id="travaux"'), page.index('id="changements"'))
 
-    def test_no_navigation_link_is_added(self):
-        nav = _render(_store())
-        self.assertEqual(nav.count('href="#travaux"'), 0)
+    def test_roadworks_is_not_promoted_into_the_masthead(self):
+        # Design law: the structural / roadworks reading never reaches the hero
+        # or the masthead nav. The answer-first digest (below the fold) may
+        # still offer one quiet jump link to the section.
+        page = _render(_store())
+        masthead = page[page.index('class="masthead"'):page.index("</header>")]
+        self.assertNotIn('href="#travaux"', masthead)
 
     def test_rendered_brief_passes_site_validation(self):
         page = _render(_store())
@@ -484,7 +488,7 @@ class RoadworksRender(unittest.TestCase):
             root = Path(temp)
             (root / "index.html").write_text(page, encoding="utf-8")
             (root / "assets").mkdir()
-            for name in ("assets/brief.css", "assets/brief.js", "favicon.svg", "explorer.html", *stage_public.METHODS):
+            for name in ("assets/brief.css", "assets/fonts.css", "assets/brief.js", "favicon.svg", "explorer.html", *stage_public.METHODS):
                 (root / name).write_text("placeholder", encoding="utf-8")
             self.assertEqual(stage_public.validate_site(root), [])
 

@@ -517,8 +517,11 @@ class SecurityHeadersConfig(unittest.TestCase):
         self.assertIn("script-src 'self';", morning)
         self.assertNotIn("script-src 'self' 'unsafe-inline'", morning)
         for csp in (explorer, morning):
-            self.assertIn("https://fonts.googleapis.com", csp)
-            self.assertIn("https://fonts.gstatic.com", csp)
+            # Type is self-hosted now: no external font origin may remain.
+            self.assertNotIn("fonts.googleapis", csp)
+            self.assertNotIn("fonts.gstatic", csp)
+            self.assertIn("font-src 'self'", csp)
+            self.assertIn("connect-src 'self'", csp)
             self.assertIn("frame-ancestors 'none'", csp)
 
     def test_method_and_media_paths_carry_a_csp(self) -> None:

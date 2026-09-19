@@ -243,7 +243,7 @@ class SiteValidation(unittest.TestCase):
             root = Path(temp)
             (root / "index.html").write_text(page, encoding="utf-8")
             (root / "assets").mkdir()
-            for name in ("assets/brief.css", "assets/brief.js", "favicon.svg",
+            for name in ("assets/brief.css", "assets/fonts.css", "assets/brief.js", "favicon.svg",
                          "explorer.html", *stage_public.METHODS):
                 (root / name).write_text("placeholder", encoding="utf-8")
             self.assertEqual(stage_public.validate_site(root), [])

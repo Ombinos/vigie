@@ -37,6 +37,8 @@ Production: **https://vigieqc.com** (custom domain; Vercel aliases route there t
 
 The brief uses publication dates during the seven days preceding the edition. It starts with Québec and nearby places; broader feeds require an explicit territory choice. Neighborhoods are mentions in source text, not guarantees of geographic impact. Saved markers do not archive publisher articles.
 
+**Front-end law (v0.2).** The brief is an answer-first instrument: « En un coup d'œil » opens the edition with measured facts and jump links to the sections; a sticky masthead, scroll-spy and a Ctrl/⌘-K command palette make finding effortless; continuity (the newest articles since your marker) stays on-device. Type is self-hosted variable Newsreader/Figtree — no external font request on any surface — with `prefers-color-scheme` and `prefers-contrast` support. `DESIGN.md` is the law; the spatial roadworks sketch, a dossier voice matrix and a dossier timeline are the designed next steps, not shipped.
+
 Read [PRODUCT_AUDIT.md](PRODUCT_AUDIT.md) for the co-founder assessment, implementation decisions, remaining limits and next experiments.
 
 ## Law of the house

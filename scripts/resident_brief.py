@@ -951,6 +951,80 @@ def article_html(item: dict, index: int, related: list[dict], media: dict | None
       </div></article>'''
 
 
+def _glance_item(label: str, text: str, href: str) -> str:
+    return (
+        f'<a class="glance-item" href="{href}">'
+        f'<span class="glance-label">{esc(label)}</span>'
+        f'<span class="glance-text">{text} '
+        '<span class="glance-go" aria-hidden="true">↗</span></span></a>'
+    )
+
+
+def digest_html(rows: list[dict], status: dict, ledger: dict | None, roadworks: dict | None,
+                issues: list[dict], now: datetime, *, has_changes: bool) -> str:
+    """Answer-first digest: orient in ten seconds, then let the reader drill down.
+
+    Sentences, not a stat strip; every line is either a measured fact of this
+    collection or it is absent. Each line links to the section that carries the
+    detail. Deterministic: same inputs, same bytes.
+    """
+    items: list[str] = []
+    total = len(rows)
+    local = sum(1 for r in rows if isinstance(r, dict) and r.get("geo") == "quebec-city")
+    if total:
+        if local:
+            text = (f"<strong>{local}</strong> article{'s' if local != 1 else ''} "
+                    f"touchent Québec et ses environs, sur <strong>{total}</strong> retenus.")
+        else:
+            text = (f"Aucun article localement ancré sur <strong>{total}</strong> retenus : "
+                    "le point lointain reste visible, jamais gonflé.")
+        items.append(_glance_item("Ici", text, "#stories"))
+    if isinstance(roadworks, dict):
+        counts = roadworks.get("counts") if isinstance(roadworks.get("counts"), dict) else {}
+        active = safe_int(counts.get("active"))
+        fetched = parse_date(roadworks.get("fetched_at"))
+        age = (now - fetched).total_seconds() if fetched else None
+        stale = age is None or age > 6 * 3600 or age < -300
+        if active or stale:
+            text = (f"<strong>{active}</strong> entrave{'s' if active != 1 else ''} "
+                    f"déclarée{'s' if active != 1 else ''} par la Ville"
+                    + (", collecte à actualiser." if stale else " dans la dernière collecte."))
+            items.append(_glance_item("Travaux", text, "#travaux"))
+    if has_changes and isinstance(ledger, dict) and ledger.get("has_previous"):
+        new = safe_int(ledger.get("new_count"))
+        dev = safe_int(ledger.get("developed_count"))
+        quiet = safe_int(ledger.get("quiet_count"))
+        if new or dev or quiet:
+            text = (f"<strong>{new}</strong> nouveau{'x' if new != 1 else ''}, "
+                    f"<strong>{dev}</strong> développé{'s' if dev != 1 else ''}, "
+                    f"<strong>{quiet}</strong> disparu{'s' if quiet != 1 else ''} de la collecte. "
+                    "Jamais « résolu ».")
+        else:
+            text = "Aucun changement de dossier depuis la dernière édition."
+        items.append(_glance_item("Dernière édition", text, "#changements"))
+    names: set[str] = set()
+    for iss in issues or []:
+        if not isinstance(iss, dict):
+            continue
+        silence = iss.get("silence") if isinstance(iss.get("silence"), dict) else {}
+        for entry in silence.get("silent") or []:
+            if isinstance(entry, dict):
+                name = str(entry.get("institution_name") or entry.get("source_name") or "").strip()
+                if name:
+                    names.add(name)
+    if names:
+        n = len(names)
+        if n == 1:
+            text = "<strong>1</strong> institution suivie n’a pas parlé dans les dossiers de cette édition."
+        else:
+            text = (f"<strong>{n}</strong> institutions suivies n’ont pas parlé dans les "
+                    "dossiers de cette édition.")
+        items.append(_glance_item("Silence", text, "#dossiers"))
+    if not items:
+        return ""
+    return ('<nav class="glance" aria-label="En un coup d’œil">' + "".join(items) + "</nav>")
+
+
 def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run: dict | None = None, ledger: dict | None = None, roadworks: dict | None = None, media: dict | None = None, anomalies: dict | None = None, edges: dict | None = None) -> str:
     now = parse_date(generated_at) or datetime.now(timezone.utc)
     rows, excluded = prepare_items(ranked, now)
@@ -977,17 +1051,21 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
     status_label = "État des sources inconnu" if not status["total"] else "Collecte indisponible" if not status["ok"] else "Collecte à actualiser" if status["stale"] else "Collecte partielle" if status["partial"] else "Dernière collecte"
     coverage = f'{status["ok"]} flux disponibles sur {status["total"]}' if status["total"] else 'État des sources inconnu'
     empty = '<p class="no-data">Aucun article récent avec une date de publication exploitable. Consultez les sources officielles ci-dessous.</p>' if not rows else ''
+    change_html = change_section(ledger)
+    dossier_html = dossiers_section(issues, eligible, edge_streets, edge_issues)
+    glance = digest_html(rows, status, ledger, roadworks, issues, now, has_changes=bool(change_html))
     return f'''<!doctype html>
 <html lang="fr-CA"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Comprendre ce qui bouge à Québec. Un point local, des sources à comparer et des repères pour agir. Sans compte, sans fil infini.">
-<meta name="theme-color" content="#152f3a"><meta name="referrer" content="no-referrer">
-<title>Vigie — Québec, à hauteur de vie</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/brief.css"><script src="/assets/brief.js" defer></script></head>
+<meta name="theme-color" content="#f5f8f8" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#0e1518" media="(prefers-color-scheme: dark)"><meta name="color-scheme" content="light dark"><meta name="referrer" content="no-referrer">
+<title>Vigie — Québec, à hauteur de vie</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/fonts.css"><link rel="stylesheet" href="/assets/brief.css"><script src="/assets/brief.js" defer></script></head>
 <body><a class="skip-link" href="#essentiel">Aller aux nouvelles</a>
-<header class="masthead"><a class="wordmark" href="/" aria-label="Vigie, accueil"><svg width="28" height="32" viewBox="0 0 28 32" aria-hidden="true"><path d="M2 5 14 28 26 5M8 5l6 12 6-12" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>vigie<span class="wordmark-dot">.</span></a><span class="edition">QUÉBEC, À HAUTEUR DE VIE</span><nav aria-label="Navigation principale"><a href="#essentiel">Le point</a><a href="#dossiers">Les dossiers</a><a href="#agir">Repères utiles</a><a href="#methode">Notre méthode</a></nav></header>
+<header class="masthead"><a class="wordmark" href="/" aria-label="Vigie, accueil"><svg width="28" height="32" viewBox="0 0 28 32" aria-hidden="true"><path d="M2 5 14 28 26 5M8 5l6 12 6-12" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>vigie<span class="wordmark-dot">.</span></a><span class="edition">QUÉBEC, À HAUTEUR DE VIE</span><nav aria-label="Navigation principale"><a href="#essentiel">Le point</a><a href="#dossiers">Les dossiers</a><a href="#agir">Repères utiles</a><a href="#methode">Notre méthode</a></nav><button class="cmdk-open js-only" type="button" id="cmdk-open" aria-haspopup="dialog" aria-controls="cmdk">Recherche rapide <kbd>Ctrl K</kbd></button></header>
 <main><section class="intro" aria-labelledby="intro-title"><div><p class="eyebrow">UNE VILLE. VOTRE QUOTIDIEN.</p><h1 id="intro-title">Moins de bruit.<br><em>Plus de Québec.</em></h1><p class="intro-text">Les nouvelles locales. Les sources pour comprendre. Les repères pour agir. Puis, reprenez votre journée.</p></div>
 <aside class="edition-note" aria-label="Fraîcheur des informations"><div class="compass" aria-hidden="true"><span>N</span><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="43"/><path d="M60 5v22M60 93v22M5 60h22M93 60h22M60 31l13 42-13-8-13 8Z"/></svg></div><p class="eyebrow">LE POINT DE REPÈRE</p><p id="freshness-label" role="status" class="freshness{' warning' if status['stale'] or status['partial'] else ''}" data-fetched="{esc(status['at'])}" data-partial="{str(status['partial']).lower()}" data-total="{status['total']}" data-ok="{status['ok']}">{status_label}</p><p class="edition-time">{date_html(status['at'], fallback='Aucune collecte horodatée')}</p><a class="coverage-link" href="#couverture">{coverage} <span aria-hidden="true">↗</span></a><p class="fine">Un instantané des sources. Pas un service d’alerte en temps réel.</p></aside></section>
 <section class="brief" id="essentiel" aria-labelledby="brief-title"><div class="section-top"><div><p class="eyebrow">L’ESSENTIEL, À VOTRE ÉCHELLE</p><h2 id="brief-title">Faire le point.</h2></div><p class="section-note">7 jours de publications.<br>Édition du {date_html(generated_at)}.</p></div>
-<div class="visit-strip js-only"><p id="visit-status" role="status">Une première visite ? Prenez vos repères.</p><button id="remember" type="button">Mémoriser ce point de lecture</button></div>
+{glance}
+<div class="visit-strip js-only"><p id="visit-status" role="status">Une première visite ? Prenez vos repères.</p><button id="remember" type="button">Mémoriser ce point de lecture</button><ul class="visit-list" id="visit-list" hidden></ul></div>
 <div class="controls js-only"><div class="view-tabs" role="group" aria-label="Vue des articles"><button type="button" data-view="brief" aria-pressed="true">Le point local</button><button type="button" data-view="new" aria-pressed="false">Depuis mon repère <span id="new-count"></span></button><button type="button" data-view="saved" aria-pressed="false">Mes articles gardés <span id="saved-count"></span></button></div>
 <div class="search-row"><label class="search-label"><span class="sr-only">Rechercher dans les titres et extraits</span><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="m12 12 5 5"/></svg><input id="search" type="search" placeholder="Une rue, un sujet, un nom…" autocomplete="off" maxlength="200"></label><label class="select-label"><span>Territoire</span><select id="scope"><option value="local">Québec et environs</option><option value="province">Tout le Québec</option><option value="all">Tous les flux</option></select></label><label class="select-label"><span>Lieu mentionné</span><select id="area"><option value="all">Tous les lieux</option>{areas}</select></label></div><div class="topic-filters" role="group" aria-label="Thème des articles">{filters}</div><p class="filter-note">Les lieux et thèmes sont repérés automatiquement. Un lieu absent d’un extrait peut échapper au filtre.</p></div>
 <noscript><p class="notice">Tous les articles récents sont affichés. La recherche et les repères personnels nécessitent JavaScript.</p></noscript>
@@ -995,8 +1073,8 @@ def render_brief(ranked: list[dict], generated_at: str, issues: list[dict], run:
 <div id="no-results" class="no-data" hidden><h3>Aucun article dans cette vue.</h3><p>Essayez un autre lieu ou élargissez le territoire. Une absence dans nos flux ne signifie pas qu’il ne se passe rien.</p><button type="button" id="empty-reset">Voir le point local</button></div>
 <div class="brief-end"><p id="end-note">Vous avez fait le tour de cette sélection.</p><button class="js-only" id="show-more" type="button">Voir les autres articles</button><span class="fine">Pas de défilement infini. Revenez quand vous en avez besoin.</span></div></section>
 {rw_html}
-{change_section(ledger)}
-{dossiers_section(issues, eligible, edge_streets, edge_issues)}
+{change_html}
+{dossier_html}
 <section class="services" id="agir" aria-labelledby="services-title"><div class="section-top"><div><p class="eyebrow">L’INFORMATION DEVIENT UTILE</p><h2 id="services-title">Et maintenant ?</h2></div><p class="section-note">Quatre accès directs<br>aux services officiels.</p></div><div class="service-grid">{service_html}</div><p class="fine">Ces liens ouvrent les services officiels. Leurs avis ne sont pas collectés par Vigie.</p></section>
 <section class="method" id="methode" aria-labelledby="method-title"><div><p class="eyebrow">LA CONFIANCE SE VÉRIFIE</p><h2 id="method-title">Les sources d’abord.<br>Le jugement vous appartient.</h2><p>Vigie rassemble des titres et des extraits. Il ne réécrit pas l’actualité et ne décide pas de ce qui est vrai à votre place.</p></div><div class="method-details"><details><summary>Comment les articles sont-ils choisis ?</summary><p>Proximité géographique (60 %) et fraîcheur de publication (40 %). La fraîcheur diminue de moitié après 36 heures. Seuls les articles datés des 7 jours précédant cette édition entrent dans ce point. Aucun poids pour les clics ou la publicité.</p><p>{excluded} articles écartés de ce point : trop anciens, date absente ou invalide, ou lien inexploitable. Les filtres changent la sélection, jamais l’ordre public.</p><a href="/ranking.md">Lire le classement publié ↗</a></details><details id="couverture"><summary>Quelles sont les limites de la couverture ?</summary><p>{coverage}. Collecte : {date_html(status['at'])}. Un flux peut omettre des articles, être tronqué ou indisponible. Cette liste n’est pas toute l’actualité de Québec.</p><ul class="coverage-list">{source_rows}</ul><a href="/sources.yaml">Consulter la liste des sources ↗</a></details><details><summary>Mes repères restent-ils privés ?</summary><p>Les articles gardés et votre point de lecture restent sur cet appareil, dans ce navigateur. Aucun compte, suivi publicitaire ou accès à votre position. Les recherches restent dans la page. Les sites sources ont leurs propres pratiques.</p><p>Les images d’aperçu proviennent des éditeurs (og:image ou média attaché à leur propre flux) : Vigie les récupère au moment de la collecte et les sert depuis ce site — votre navigateur ne contacte aucun éditeur en lisant ce point. Un article dont l’éditeur ne publie pas d’image reste sans image : aucune image n’est inventée.</p><button id="clear-local" type="button" class="js-only">Effacer mes repères sur cet appareil</button><p id="privacy-status" role="status"></p></details><details><summary>Qui finance Vigie ?</summary><p>Le projet est actuellement financé par son fondateur. Aucun achat de placement dans le classement.</p><a href="/RENT.md">Lire le financement déclaré ↗</a></details><details><summary>Explorer le prototype et ses dossiers</summary><p>L’atelier conserve les comparaisons de sources et la méthode expérimentale. Les regroupements sont proposés, les contradictions et l’indépendance des sources ne sont pas établies.</p><a href="/explorer.html">Ouvrir l’atelier de recherche ↗</a></details></div></section></main>
-<footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span><a class="legal-link" href="/legal.md">Mentions légales, attribution et retrait</a></footer><div id="toast" role="status" aria-live="polite"></div></body></html>'''
+<footer><a class="wordmark" href="/">vigie<span class="wordmark-dot">.</span></a><p>Un peu plus au courant.<br>Un peu plus libre de votre temps.</p><span>Fait pour Québec.<br>Édition expérimentale.</span><a class="legal-link" href="/legal.md">Mentions légales, attribution et retrait</a></footer><div class="cmdk js-only" id="cmdk" hidden role="dialog" aria-modal="true" aria-labelledby="cmdk-title"><div class="cmdk-panel"><h2 id="cmdk-title" class="sr-only">Recherche rapide</h2><input id="cmdk-input" class="cmdk-input" type="text" role="combobox" aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list" placeholder="Chercher un article, un lieu, une section…" autocomplete="off" maxlength="200"><ul id="cmdk-list" class="cmdk-list" role="listbox" aria-label="Résultats"></ul><p class="cmdk-hint">Entrée pour ouvrir · Échap pour fermer · Ctrl ou ⌘ + K</p></div></div><div id="toast" role="status" aria-live="polite"></div></body></html>'''

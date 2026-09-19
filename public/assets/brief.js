@@ -70,6 +70,7 @@
   const searchEl = $('#search'), scopeEl = $('#scope'), areaEl = $('#area');
   const resultCountEl = $('#result-count'), noResultsEl = $('#no-results'), showMoreEl = $('#show-more');
   const endNoteEl = $('#end-note'), savedCountEl = $('#saved-count'), newCountEl = $('#new-count'), visitStatusEl = $('#visit-status');
+  const visitListEl = $('#visit-list');
   const viewBtns = all('[data-view]'), topicBtns = all('[data-topic]');
   function render() {
     const terms = fold(searchEl.value.trim()).split(/\s+/).filter(Boolean);
@@ -106,6 +107,28 @@
       : state.visited ? `${newCount} article(s) apparu(s) dans les flux depuis votre repère du ${dateText(state.visited)}. Ce n’est pas un suivi des modifications.`
       : 'Mémorisez votre point de lecture pour voir les nouveaux articles à votre prochaine visite.';
     if (view === 'new' && state.seen === null) visitStatusEl.textContent = 'Créez d’abord un repère avec « Mémoriser ce point de lecture ».';
+    // Continuity (on-device only): name the newest articles since the marker,
+    // so "what appeared since you left" is concrete, not just a number.
+    if (visitListEl) {
+      const fresh = state.seen === null ? [] : cards.filter(c => !seenSet.has(c.id));
+      const shown = fresh.slice(0, 4);
+      visitListEl.hidden = shown.length === 0;
+      visitListEl.textContent = '';
+      shown.forEach(c => {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = '#article-' + c.id;
+        a.textContent = c.title.replace(/\s*↗\s*$/, '');
+        li.appendChild(a);
+        visitListEl.appendChild(li);
+      });
+      if (fresh.length > shown.length) {
+        const li = document.createElement('li');
+        li.className = 'visit-more';
+        li.textContent = `et ${fresh.length - shown.length} autre(s), dans la vue « Depuis mon repère ».`;
+        visitListEl.appendChild(li);
+      }
+    }
   }
   function reset() { topic = 'all'; view = 'brief'; limit = 6; searchEl.value = ''; scopeEl.value = 'local'; areaEl.value = 'all'; render(); }
   viewBtns.forEach(b => on(b, 'click', () => { view = b.dataset.view; limit = 6; if (view === 'saved' || view === 'new') { scopeEl.value = 'all'; areaEl.value = 'all'; searchEl.value = ''; topic = 'all'; } else { scopeEl.value = 'local'; } render(); }));
@@ -144,6 +167,115 @@
   // Hash links to disclosures must open the disclosure, including direct URLs.
   const revealHash = () => { if (location.hash === '#couverture' && $('#couverture')) $('#couverture').open = true; };
   window.addEventListener('hashchange', revealHash); revealHash();
+  // Command palette (Ctrl/Cmd-K) + section scout. Progressive: without JS the
+  // page stays fully readable and the masthead links still work.
+  const cmdk = $('#cmdk'), cmdkInput = $('#cmdk-input'), cmdkList = $('#cmdk-list'), cmdkOpenBtn = $('#cmdk-open');
+  const navLinks = all('.masthead nav a');
+  const sections = navLinks.map(a => ({ label: a.textContent.trim(), target: a.getAttribute('href') })).filter(s => s.target);
+  let cmdkItems = [], cmdkActive = 0, cmdkOpener = null;
+  const cmdkDraw = () => {
+    const query = cmdkInput ? cmdkInput.value.trim() : '';
+    const terms = fold(query).split(/\s+/).filter(Boolean);
+    const hits = [];
+    sections.forEach(s => {
+      if (!terms.length || terms.every(t => fold(s.label).includes(t))) hits.push({ kind: 'Section', title: s.label, target: s.target, id: '' });
+    });
+    if (terms.length) {
+      for (const c of cards) {
+        if (hits.length >= 10) break;
+        if (terms.every(t => c.search.includes(t))) hits.push({ kind: 'Article', title: c.title.replace(/\s*↗\s*$/, ''), target: '', id: c.id });
+      }
+    }
+    cmdkItems = hits.slice(0, 9);
+    if (cmdkActive >= cmdkItems.length) cmdkActive = 0;
+    cmdkList.textContent = '';
+    if (!cmdkItems.length) {
+      const empty = document.createElement('li');
+      empty.className = 'cmdk-empty';
+      empty.textContent = terms.length ? 'Aucun résultat. Élargissez le terme.' : 'Tapez pour chercher un article, un lieu ou une section.';
+      cmdkList.appendChild(empty);
+      if (cmdkInput) cmdkInput.setAttribute('aria-activedescendant', '');
+      return;
+    }
+    cmdkItems.forEach((it, i) => {
+      const li = document.createElement('li');
+      li.className = 'cmdk-opt';
+      li.id = 'cmdk-opt-' + i;
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', String(i === cmdkActive));
+      const kind = document.createElement('span'); kind.className = 'cmdk-kind'; kind.textContent = it.kind;
+      const title = document.createElement('span'); title.className = 'cmdk-title'; title.textContent = it.title;
+      li.append(kind, title);
+      li.addEventListener('mousedown', e => { e.preventDefault(); cmdkChoose(i); });
+      cmdkList.appendChild(li);
+    });
+    if (cmdkInput) cmdkInput.setAttribute('aria-activedescendant', 'cmdk-opt-' + cmdkActive);
+  };
+  const cmdkClose = () => {
+    if (!cmdk) return;
+    cmdk.hidden = true;
+    if (cmdkOpener && cmdkOpener.focus) cmdkOpener.focus();
+    cmdkOpener = null;
+  };
+  const cmdkChoose = i => {
+    const it = cmdkItems[i];
+    if (!it) return;
+    cmdkClose();
+    if (it.id) {
+      // Reach the article whatever the current filters are.
+      view = 'brief'; topic = 'all'; scopeEl.value = 'all'; areaEl.value = 'all'; searchEl.value = ''; limit = cards.length;
+      render();
+    }
+    const node = document.querySelector(it.id ? '#article-' + it.id : it.target);
+    if (node) {
+      node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      node.setAttribute('tabindex', '-1');
+      node.focus();
+    } else if (it.target) {
+      location.hash = it.target;
+    }
+  };
+  const cmdkOpen = opener => {
+    if (!cmdk) return;
+    cmdkOpener = opener || document.activeElement;
+    cmdk.hidden = false;
+    cmdkActive = 0;
+    if (cmdkInput) { cmdkInput.value = ''; cmdkInput.focus(); }
+    cmdkDraw();
+  };
+  if (cmdk && cmdkOpenBtn) on(cmdkOpenBtn, 'click', () => cmdkOpen(cmdkOpenBtn));
+  if (cmdk) {
+    on(document, 'keydown', e => {
+      const key = (e.key || '').toLowerCase();
+      if ((e.metaKey || e.ctrlKey) && key === 'k') {
+        e.preventDefault();
+        if (cmdk.hidden) cmdkOpen(document.activeElement); else cmdkClose();
+        return;
+      }
+      if (cmdk.hidden) return;
+      if (e.key === 'Escape') { e.preventDefault(); cmdkClose(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); cmdkActive = Math.min(cmdkActive + 1, cmdkItems.length - 1); cmdkDraw(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); cmdkActive = Math.max(cmdkActive - 1, 0); cmdkDraw(); }
+      else if (e.key === 'Enter') { e.preventDefault(); cmdkChoose(cmdkActive); }
+    });
+    on(cmdkInput, 'input', () => { cmdkActive = 0; cmdkDraw(); });
+    on(cmdk, 'mousedown', e => { if (e.target === cmdk) cmdkClose(); });
+  }
+  // Section scout: highlight the section you are actually reading.
+  const spyIds = ['essentiel', 'travaux', 'changements', 'dossiers', 'agir', 'methode'];
+  if ('IntersectionObserver' in window && navLinks.length) {
+    const byHref = new Map(navLinks.map(a => [a.getAttribute('href'), a]));
+    const spy = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const link = byHref.get('#' + entry.target.id);
+        if (!link) return;
+        navLinks.forEach(a => a.removeAttribute('aria-current'));
+        link.setAttribute('aria-current', 'true');
+      });
+    }, { rootMargin: '-45% 0px -50% 0px' });
+    spyIds.map(id => document.getElementById(id)).filter(Boolean).forEach(node => spy.observe(node));
+  }
   // Reveal controls first, then render: a missing shell element in a future
   // edition must leave the static article reading intact, never a dead page.
   document.documentElement.classList.add('js');

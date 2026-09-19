@@ -3,7 +3,8 @@
 Date: 2026-09-16  
 Last verified: 2026-09-17  
 Method id: `beauty-without-fog-v0.1`  
-Surface: Lookout Arrival first viewport (`public/index.html` via `rank_display.py`)
+Surface: Lookout Arrival (`public/explorer.html` via `rank_display.py`). The
+resident front door (`public/index.html`) is governed by the v0.2 law below.
 
 Beauty is method made effortless. Fog is chrome that pretends to clarify.
 
@@ -54,6 +55,49 @@ Publisher `og:image` only, fetched at collection time (`scripts/fetch_brief_medi
 
 The anomaly beacon (`anomalies.md`, `anomaly-beacon-v1`) and street-level joins (`edge.md`, `edge-atlas-v1`) live **inside the Travaux et entraves section** — never the first viewport, never the hero. Fixed-threshold collection facts in one quiet accent-bordered block; no red, no pulse, no alert chrome. Zero measured anomalies means the brief is byte-identical to a brief without the feature. A join always presents itself as « Rapprochement proposé … une mention textuelle, pas une preuve géographique » — never as geographic proof, never as importance.
 
+## Resident brief — front-end law (v0.2, 2026-09-19)
+
+Surface: the resident front door `public/index.html` (via `resident_brief.py`,
+orchestrated by `rank_display.py`). Method id: `brief-front-end-v0.2`.
+
+North star: an effortless epistemic instrument. Orient in ten seconds, verify in
+sixty, act and leave. The SOTA we borrow: layer-cake scanning (headings carry the
+meaning), progressive disclosure capped at two levels, answer-first (BLUF),
+adaptive variable type, persistent wayfinding, and static maps with a legend
+(never a decorative basemap).
+
+### Do
+
+1. **Answer first.** The edition opens with « En un coup d'œil »: sentences, each
+   a measured fact of this collection and a jump link to its section. Never a
+   stat strip, never a score.
+2. **One voice, self-hosted.** Newsreader + Figtree, variable, latin/latin-ext,
+   served from our own origin. No external font request on any surface.
+3. **Adapt to the reader.** `prefers-color-scheme` and `prefers-contrast`; weight
+   and grade eased for reversed contrast; `prefers-reduced-motion` honored.
+4. **Effortless finding.** Sticky masthead, scroll-spy `aria-current`, and a
+   Ctrl/⌘-K command palette (sections + articles). All progressive: without JS
+   every article still reads.
+5. **Continuity on-device.** The reading marker names the newest articles since
+   the last visit; never a tracking of world changes.
+6. **Honest emptiness.** A quiet edition renders no digest and no live-looking
+   chrome; absence is reported as absence.
+
+### Do not
+
+1. No external request, no analytics, no font CDN.
+2. No hero stat strip, no score, no bias meter, no engagement device.
+3. Never invent a place image or a map; a map ships only with a real basemap and
+   an honest legend.
+4. Never promote Travaux / structural reading into the hero or the masthead.
+
+### Roadmap (designed, not shipped)
+
+- **Spatial sketch of active obstructions**: static self-hosted SVG, dot density
+  with a legend, labelled « schéma de répartition, pas une preuve géographique ».
+- **Dossier voice matrix**: institutions × (spoke / silent / unit) at a glance.
+- **Dossier timeline**: field-level revisions, not only collection presence.
+
 ## Decision log
 
 | Date | Decision | Owner |
@@ -63,3 +107,5 @@ The anomaly beacon (`anomalies.md`, `anomaly-beacon-v1`) and street-level joins 
 | TBD | Add full-bleed only with a real named place image in `public/place/` and a row above | Inventor |
 | 2026-09-18 | Brief preview images: publisher og:image, locally re-hosted and sniffed; never stock, never invented | Bucky + Inventor |
 | 2026-09-19 | Edge Atlas + anomaly beacon: structural reading confined to the Travaux section; hero untouched; both collapse byte-identical when empty | Bucky + Inventor |
+| 2026-09-19 | Brief front-end v0.2: answer-first digest, self-hosted variable type, dark/contrast adaptation, sticky masthead + Ctrl/⌘-K palette, on-device continuity; no external font request on any surface | Bucky + Inventor |
+| 2026-09-19 | Roadworks stays out of hero and masthead; one quiet digest jump link is allowed (regression renamed to check the masthead only) | Bucky + Inventor |

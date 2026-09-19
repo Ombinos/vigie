@@ -1,0 +1,14 @@
+Vigie self-hosted typefaces
+===========================
+
+Figtree — Copyright (c) 2022 Erik Kennedy.
+Newsreader — Copyright (c) 2025 Production Type.
+
+Both are licensed under the SIL Open Font License, Version 1.1. Full license:
+https://openfontlicense.org — see the respective Google Fonts specimen pages:
+https://fonts.google.com/specimen/Figtree
+https://fonts.google.com/specimen/Newsreader
+
+Files here are the "latin" and "latin-ext" subsets in woff2, downloaded once
+from the Google Fonts CSS2 endpoint. They are served from Vigie's own origin;
+reading Vigie never contacts Google.

@@ -1406,11 +1406,7 @@ def render_html(ranked: list[dict], generated_at: str, issues: list[dict] | None
   <meta name="theme-color" content="#0b4f4a" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <title>Vigie — Quebec City lookout</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;family=Figtree:wght@400;500;600&amp;display=swap" />
-  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;family=Figtree:wght@400;500;600&amp;display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
-  <noscript><link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&amp;family=Figtree:wght@400;500;600&amp;display=swap" rel="stylesheet" /></noscript>
+  <link rel="stylesheet" href="/assets/fonts.css" />
   <style>
     :root {{
       /* beauty-without-fog-v0.1 — Cap Diamant stone · fleuve slate · winter ice */
