@@ -91,10 +91,16 @@ adaptive variable type, persistent wayfinding, and static maps with a legend
    an honest legend.
 4. Never promote Travaux / structural reading into the hero or the masthead.
 
+### Spatial reading (shipped)
+
+- **Spatial sketch of active obstructions** (v0.2): a static, self-hosted SVG dot
+  density over the official coordinates, with a legend, a scale bar and the
+  label « schéma de répartition, pas une preuve géographique ». No basemap is
+  drawn (none is licensed here); the official map stays the reference. It
+  collapses to zero HTML without usable coordinates and never reaches the hero.
+
 ### Roadmap (designed, not shipped)
 
-- **Spatial sketch of active obstructions**: static self-hosted SVG, dot density
-  with a legend, labelled « schéma de répartition, pas une preuve géographique ».
 - **Dossier voice matrix**: institutions × (spoke / silent / unit) at a glance.
 - **Dossier timeline**: field-level revisions, not only collection presence.
 
@@ -109,3 +115,4 @@ adaptive variable type, persistent wayfinding, and static maps with a legend
 | 2026-09-19 | Edge Atlas + anomaly beacon: structural reading confined to the Travaux section; hero untouched; both collapse byte-identical when empty | Bucky + Inventor |
 | 2026-09-19 | Brief front-end v0.2: answer-first digest, self-hosted variable type, dark/contrast adaptation, sticky masthead + Ctrl/⌘-K palette, on-device continuity; no external font request on any surface | Bucky + Inventor |
 | 2026-09-19 | Roadworks stays out of hero and masthead; one quiet digest jump link is allowed (regression renamed to check the masthead only) | Bucky + Inventor |
+| 2026-09-19 | Phase E spatial reading: store carries each event's first official vertex; the brief draws a static self-hosted dot-density scheme with legend and scale, no basemap, no geographic-proof claim | Bucky + Inventor |

@@ -155,6 +155,9 @@ def parse_event(feature: object) -> tuple[dict | None, str | None]:
         return None, "outside_bbox"
     event = {
         "event_id": event_id,
+        # First declared vertex: enough for the brief's static spatial scheme,
+        # never a route or a geographic proof. Official coordinates only.
+        "point": [float(points[0][0]), float(points[0][1])],
         "event_type": _clean_str(props.get("event_type")),
         "event_status": (_clean_str(props.get("event_status")) or "").lower() or None,
         "vehicle_impact": (_clean_str(props.get("vehicle_impact")) or "").lower() or None,

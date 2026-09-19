@@ -14,6 +14,7 @@ from pathlib import Path
 
 import harness
 
+import ingest_wzdx
 import resident_brief as brief
 
 ROOT = harness.ROOT
@@ -139,6 +140,50 @@ class WayfindingAndContinuity(unittest.TestCase):
         html = path.read_text(encoding="utf-8")
         masthead = html[html.index('class="masthead"'):html.index("</header>")]
         self.assertNotIn('href="#travaux"', masthead)
+
+
+class SpatialSketch(unittest.TestCase):
+    """Phase E: a distribution scheme over official coordinates, never a map."""
+
+    def _rw(self) -> dict:
+        return {"bbox": list(ingest_wzdx.METRO_BBOX)}
+
+    def test_plots_only_usable_in_bbox_points(self) -> None:
+        events = [
+            {"event_id": "a", "point": [-71.2, 46.8], "vehicle_impact": "all-lanes-closed"},
+            {"event_id": "b", "point": [-71.3, 46.9], "vehicle_impact": "some-lanes-closed"},
+            {"event_id": "c", "point": [-99.0, 10.0], "vehicle_impact": "some-lanes-closed"},
+            {"event_id": "d", "point": "nope", "vehicle_impact": "some-lanes-closed"},
+            {"event_id": "e"},
+        ]
+        html = brief._rw_sketch(self._rw(), events)
+        self.assertEqual(html.count("<circle"), 2)
+        self.assertIn("2 entraves actives déclarées", html)
+        self.assertIn("1 fermeture complète", html)
+        self.assertIn('role="img"', html)
+        self.assertIn("pas une carte routière", html)
+        self.assertIn("pas une preuve géographique", html)
+        self.assertNotIn("http", html)
+
+    def test_collapses_without_bbox_or_points(self) -> None:
+        event = {"event_id": "a", "point": [-71.2, 46.8]}
+        self.assertEqual(brief._rw_sketch(self._rw(), []), "")
+        self.assertEqual(brief._rw_sketch({}, [event]), "")
+        self.assertEqual(brief._rw_sketch({"bbox": [1, 2, 3]}, [event]), "")
+        self.assertEqual(brief._rw_sketch({"bbox": ["x", 2, 3, 4]}, [event]), "")
+
+    def test_is_deterministic_and_id_sorted(self) -> None:
+        first = [{"event_id": "b", "point": [-71.3, 46.8]},
+                 {"event_id": "a", "point": [-71.2, 46.8]}]
+        self.assertEqual(brief._rw_sketch(self._rw(), first),
+                         brief._rw_sketch(self._rw(), list(reversed(first))))
+
+    def test_ingest_carries_the_declared_point(self) -> None:
+        feature = {"id": "X", "properties": {},
+                   "geometry": {"type": "Point", "coordinates": [-71.21, 46.81]}}
+        event, reason = ingest_wzdx.parse_event(feature)
+        self.assertIsNone(reason)
+        self.assertEqual(event["point"], [-71.21, 46.81])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -771,6 +772,96 @@ def _rw_card(event: dict, new_ids: set, changed_by_id: dict, has_previous: bool,
     )
 
 
+RW_SKETCH_W = 720.0
+RW_SKETCH_H = 320.0
+RW_SKETCH_PAD = 10.0
+
+
+def _rw_sketch(rw: dict, events: list[dict]) -> str:
+    """Static spatial scheme of the declared obstructions — no basemap.
+
+    Dot density over the official collection's own coordinates: where the
+    declarations cluster, never a road map and never geographic proof. No
+    basemap is drawn (none is licensed here); the official map stays the
+    reference. Deterministic: events sorted by id, and the whole block collapses
+    to zero HTML without usable coordinates.
+    """
+    bbox = rw.get("bbox")
+    if (not isinstance(bbox, list) or len(bbox) != 4
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in bbox)):
+        return ""
+    min_lon, min_lat, max_lon, max_lat = (float(v) for v in bbox)
+    if max_lon <= min_lon or max_lat <= min_lat:
+        return ""
+    pts: list[tuple[float, float, bool]] = []
+    for event in sorted((e for e in events if isinstance(e, dict)),
+                        key=lambda e: str(e.get("event_id") or "")):
+        point = event.get("point")
+        if not isinstance(point, list) or len(point) != 2:
+            continue
+        try:
+            lon, lat = float(point[0]), float(point[1])
+        except (TypeError, ValueError):
+            continue
+        if not (min_lon <= lon <= max_lon and min_lat <= lat <= max_lat):
+            continue
+        pts.append((lon, lat, str(event.get("vehicle_impact") or "") == "all-lanes-closed"))
+    if not pts:
+        return ""
+
+    def sx(lon: float) -> float:
+        return RW_SKETCH_PAD + (lon - min_lon) / (max_lon - min_lon) * (RW_SKETCH_W - 2 * RW_SKETCH_PAD)
+
+    def sy(lat: float) -> float:
+        return RW_SKETCH_PAD + (max_lat - lat) / (max_lat - min_lat) * (RW_SKETCH_H - 2 * RW_SKETCH_PAD)
+
+    grid = "".join(
+        f'<line class="rw-grid" x1="{sx(min_lon + (max_lon - min_lon) * i / 4):.0f}" y1="{RW_SKETCH_PAD:.0f}" '
+        f'x2="{sx(min_lon + (max_lon - min_lon) * i / 4):.0f}" y2="{RW_SKETCH_H - RW_SKETCH_PAD:.0f}" />'
+        for i in range(1, 4)
+    ) + "".join(
+        f'<line class="rw-grid" x1="{RW_SKETCH_PAD:.0f}" y1="{sy(min_lat + (max_lat - min_lat) * i / 4):.0f}" '
+        f'x2="{RW_SKETCH_W - RW_SKETCH_PAD:.0f}" y2="{sy(min_lat + (max_lat - min_lat) * i / 4):.0f}" />'
+        for i in range(1, 4)
+    )
+    dots = "".join(
+        f'<circle class="{"rw-dot-closed" if closed else "rw-dot"}" '
+        f'cx="{sx(lon):.1f}" cy="{sy(lat):.1f}" r="{3.1 if closed else 2.2:.1f}" />'
+        for lon, lat, closed in pts
+    )
+    span_km = (max_lon - min_lon) * 111.32 * math.cos(math.radians((min_lat + max_lat) / 2))
+    bar_km = max(1, round(span_km / 5)) if span_km else 1
+    bar_px = (bar_km / span_km * (RW_SKETCH_W - 2 * RW_SKETCH_PAD)) if span_km else 0.0
+    n = len(pts)
+    n_closed = sum(1 for _, _, closed in pts if closed)
+    legend = (
+        f'<span><span class="rw-key rw-key-dot"></span>{n} entrave'
+        f'{"s" if n != 1 else ""} active{"s" if n != 1 else ""} déclarée{"s" if n != 1 else ""}</span>'
+        + (
+            f'<span><span class="rw-key rw-key-closed"></span>{n_closed} fermeture'
+            f'{"s" if n_closed != 1 else ""} complète{"s" if n_closed != 1 else ""}</span>'
+            if n_closed else ""
+        )
+        + f'<span><span class="rw-key rw-key-bar"></span>échelle ≈ {bar_km} km</span>'
+    )
+    return (
+        '<figure class="rw-sketch">'
+        f'<svg viewBox="0 0 {RW_SKETCH_W:.0f} {RW_SKETCH_H:.0f}" role="img" '
+        f'aria-label="Schéma de répartition : {n} entraves déclarées dans la zone couverte. '
+        'La liste complète suit.">'
+        f'<rect class="rw-sketch-frame" x="{RW_SKETCH_PAD:.0f}" y="{RW_SKETCH_PAD:.0f}" '
+        f'width="{RW_SKETCH_W - 2 * RW_SKETCH_PAD:.0f}" height="{RW_SKETCH_H - 2 * RW_SKETCH_PAD:.0f}" />'
+        f"{grid}"
+        f'<line class="rw-scale" x1="{RW_SKETCH_PAD:.0f}" y1="{RW_SKETCH_H - RW_SKETCH_PAD - 6:.0f}" '
+        f'x2="{RW_SKETCH_PAD + bar_px:.1f}" y2="{RW_SKETCH_H - RW_SKETCH_PAD - 6:.0f}" />'
+        f"{dots}</svg>"
+        f'<figcaption class="rw-sketch-cap">{legend}</figcaption>'
+        '<p class="fine">Schéma de répartition projeté sur les coordonnées officielles — '
+        "pas une carte routière, pas une preuve géographique, aucun effet sur votre trajet. "
+        "La carte officielle reste la référence.</p></figure>"
+    )
+
+
 def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = None,
                       edges: dict | None = None) -> str:
     """Official road obstructions — structured change data, never articles.
@@ -814,6 +905,7 @@ def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = N
     edge_streets, _ = valid_edges(edges)
     anomaly_rows = valid_anomalies(anomalies)
     beacon = anomalies_html(anomaly_rows, total=anomaly_total(anomalies, anomaly_rows))
+    sketch = _rw_sketch(rw, ordered)
     cards = "".join(
         _rw_card(e, new_ids, changed_by_id, has_previous, history, edge_streets)
         for e in ordered[:RW_DISPLAY_CAP]
@@ -887,7 +979,7 @@ def roadworks_section(rw: dict | None, now: datetime, anomalies: dict | None = N
         '<p class="dossiers-intro">Les entraves déclarées par la Ville dans son flux '
         "officiel en temps réel, relayées telles quelles. Vigie ne recalcule aucun "
         "effet sur votre trajet et ne classe pas ces données avec les articles.</p>"
-        f"{changes}{beacon}{listing}{more}{stale_html}"
+        f"{sketch}{changes}{beacon}{listing}{more}{stale_html}"
         f'<p class="rw-map"><a href="{RW_MAP_URL}" rel="noopener noreferrer">Ouvrir la carte officielle des travaux <span aria-hidden="true">↗</span></a></p>'
         f'<p class="rw-attr fine">Données : {dataset_link} (CC-BY 4.0, via Données Québec). '
         f"Collecte du {date_html(fetched.isoformat())}. Les dates marquées « estimées » "

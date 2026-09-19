@@ -150,4 +150,18 @@ img{opacity:.94}
 }
 @media(prefers-contrast:more){:root{--muted:#3a4f59;--line:#9fb2bb}body{font-weight:460}}
 @media(prefers-contrast:more) and (prefers-color-scheme:dark){:root{--muted:#c3d3da;--line:#5b7480}}
+/* Spatial reading - a scheme, never a basemap */
+.rw-sketch{margin:0 0 18px}
+.rw-sketch svg{display:block;width:100%;height:auto;background:var(--light);border:1px solid var(--line)}
+.rw-sketch-frame{fill:none;stroke:var(--line)}
+.rw-grid{stroke:var(--line);stroke-opacity:.55;stroke-width:.6}
+.rw-scale{stroke:var(--ink);stroke-width:2}
+.rw-dot{fill:var(--blue);fill-opacity:.55}
+.rw-dot-closed{fill:#7a2e1d;fill-opacity:.85}
+.rw-sketch-cap{display:flex;flex-wrap:wrap;gap:6px 18px;margin:9px 0 5px;font-size:var(--step--2);color:var(--muted)}
+.rw-key{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.rw-key-dot{background:var(--blue);opacity:.6}
+.rw-key-closed{background:#7a2e1d}
+.rw-key-bar{width:16px;height:2px;border-radius:0;background:var(--ink);vertical-align:middle}
+@media(prefers-color-scheme:dark){.rw-sketch svg{background:#131e22}.rw-dot-closed{fill:#e0906f}.rw-key-closed{background:#e0906f}}
 @media print{.glance,.cmdk{display:none!important}}
