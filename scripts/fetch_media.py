@@ -74,11 +74,39 @@ def extract_og(html: str, base: str) -> str | None:
     return None
 
 
-def fetch_html(url: str, *, retries: int = 2) -> str | None:
-    """Browser-like GET with one retry — Journal de Québec often fails once."""
+def _classify_http_error(code: int, prefix: str) -> str:
+    if code in (403, 404, 410):
+        return f"{prefix}_http_{code}"
+    if 500 <= code <= 599:
+        return f"{prefix}_http_5xx"
+    return f"{prefix}_http_4xx"
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    reason = getattr(exc, "reason", None)
+    return isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError)
+
+
+def fetch_html(url: str, *, retries: int = 2, diag: dict | None = None) -> str | None:
+    """Browser-like GET with one retry — Journal de Québec often fails once.
+
+    When `diag` is a dict it receives {"reason", "detail"} classifying the
+    failure (media-sentinel diagnosis): article_http_403/404/410/4xx/5xx,
+    article_timeout, article_network_error, article_guard_rejected,
+    article_too_large. An unfilled diag means the caller was mocked or the
+    failure predates classification.
+    """
+    last: tuple[str, str] = ("article_fetch_failed", "")
+
+    def fail(reason: str, detail: str = "") -> None:
+        if isinstance(diag, dict):
+            diag["reason"] = reason
+            diag["detail"] = str(detail)[:160]
+
     try:
         public_http_url(url, resolve=True)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as exc:
+        fail("article_guard_rejected", f"{type(exc).__name__}: {exc}")
         return None
     host = urlparse(url).hostname or ""
     headers = {
@@ -91,22 +119,31 @@ def fetch_html(url: str, *, retries: int = 2) -> str | None:
     if host in {"journaldequebec.com", "www.journaldequebec.com", "journaldemontreal.com", "www.journaldemontreal.com"}:
         headers["Referer"] = "https://www.journaldequebec.com/"
     opener = public_opener()
-    for attempt in range(max(1, min(retries, 3))):
+    attempts = max(1, min(retries, 3))
+    for attempt in range(attempts):
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with opener.open(req, timeout=TIMEOUT) as resp:
                 content_length = resp.headers.get("Content-Length")
-                if content_length and int(content_length) > MAX_HTML_BYTES:
+                if content_length and str(content_length).isdigit() and int(content_length) > MAX_HTML_BYTES:
+                    fail("article_too_large", f"content_length={content_length}")
                     return None
                 raw = resp.read(MAX_HTML_BYTES + 1)
                 if len(raw) > MAX_HTML_BYTES:
+                    fail("article_too_large", f"bytes>{MAX_HTML_BYTES}")
                     return None
                 return raw.decode("utf-8", errors="replace")
-        except ValueError:
+        except ValueError as exc:
+            fail("article_guard_rejected", f"{type(exc).__name__}: {exc}")
             return None
-        except (OSError, urllib.error.URLError, http.client.HTTPException):
-            if attempt + 1 < max(1, min(retries, 3)):
-                time.sleep(0.35 * (attempt + 1))
+        except urllib.error.HTTPError as exc:
+            last = (_classify_http_error(exc.code, "article"), f"HTTP {exc.code}")
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+            reason = "article_timeout" if _is_timeout(exc) else "article_network_error"
+            last = (reason, f"{type(exc).__name__}: {exc}")
+        if attempt + 1 < attempts:
+            time.sleep(0.35 * (attempt + 1))
+    fail(*last)
     return None
 
 

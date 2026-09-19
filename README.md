@@ -56,7 +56,7 @@ Read [PRODUCT_AUDIT.md](PRODUCT_AUDIT.md) for the co-founder assessment, impleme
 
 ## Pipe
 
-ingest (RSS + official WZDX roadworks) → normalize → enrich (proposed) → cluster dossiers → edge atlas + anomaly rules (over the official collection) → brief media (publisher og:image, served locally) → rank → resident brief + explorer + morning
+ingest (RSS + official WZDX roadworks) → normalize → enrich (proposed) → cluster dossiers → edge atlas + anomaly rules (over the official collection) → brief media (publisher images — og:image or the feed's own media — served locally, every miss diagnosed) → rank → resident brief + explorer + morning
 
 Classifications and dossiers are provisional. Named institutions do not prove independent ownership or reporting. Publication, collection, grouping and build time remain distinct. WZDX roadwork data is structured official change data, not articles: it bypasses normalize/enrich/cluster/rank, renders in its own finite brief section with attribution and collection diffs, and a feed outage never blocks the news pipeline. Removed from a collection is never reported as ended or resolved.
 

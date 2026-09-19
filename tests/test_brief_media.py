@@ -218,6 +218,13 @@ class UpdateMedia(unittest.TestCase):
         d = Path(self._tmp.name)
         self.media_dir = d / "brief"
         self.manifest = d / "brief_manifest.json"
+        self.raw_dir = d / "raw"
+        self.raw_dir.mkdir()
+        self.health = d / "media_health.json"
+        for name, value in (("RAW_DIR", self.raw_dir), ("HEALTH", self.health)):
+            patcher = mock.patch.object(fbm, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.cand = {"id": "c1", "url": "https://news.example/a"}
         self.uid = fbm.brief_uid(self.cand["url"])
 
@@ -267,7 +274,7 @@ class UpdateMedia(unittest.TestCase):
         fi.assert_not_called()
         entry = doc["media"][self.uid]
         self.assertIsNone(entry["file"])
-        self.assertEqual(entry["reason"], "no og:image")
+        self.assertEqual(entry["reason"], "no_publisher_image")
         self.assertEqual(doc["with_image"], 0)
         self.assertEqual(self.stored_files(), [])
 
@@ -282,7 +289,7 @@ class UpdateMedia(unittest.TestCase):
     def test_negative_result_is_retried_next_run(self) -> None:
         with mock.patch.object(fbm.fetch_media, "fetch_html", return_value=None):
             doc = fbm.update_media([self.cand], media_dir=self.media_dir, manifest_path=self.manifest)
-        self.assertEqual(doc["media"][self.uid]["reason"], "fetch_failed")
+        self.assertEqual(doc["media"][self.uid]["reason"], "article_fetch_failed")
         with mock.patch.object(fbm.fetch_media, "fetch_html", return_value=OG_HTML), \
                 mock.patch.object(fbm, "fetch_image", return_value=(PNG, "png")):
             doc = fbm.update_media([self.cand], media_dir=self.media_dir, manifest_path=self.manifest)

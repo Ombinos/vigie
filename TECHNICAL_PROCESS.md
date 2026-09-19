@@ -30,7 +30,7 @@ Open http://127.0.0.1:8765/
 | 4 Cluster | `scripts/cluster_issues.py` | `data/issues/latest_issues.json` — multi-voice only |
 | 4b Edge Atlas | `scripts/edge_atlas.py` | `data/edges/latest_edges.json` — literal street-name joins between the official collection and the dossiers (`edge.md`) |
 | 4c Anomalies | `scripts/compile_anomalies.py` | `data/anomalies/latest_verdict.json` — fixed-threshold structural rules over the official collection (`anomalies.md`) |
-| 4d Brief media | `scripts/fetch_brief_media.py` | `data/media/brief/` + `brief_manifest.json` — publisher og:image, locally re-hosted and sniffed |
+| 4d Brief media | `scripts/fetch_brief_media.py` | `data/media/brief/` + `brief_manifest.json` — publisher images (og:image, else the feed's own media), locally re-hosted and sniffed; every miss diagnosed + `data/ops/media_health.json` ledger |
 | 5 Rank+HTML | `scripts/rank_display.py` | `latest_ranked.json` + `public/index.html` (French brief, incl. roadworks/beacon/joins) + `explorer.html` + ambient twin via `ambient_pulse` |
 | 5b Ambient | `scripts/ambient_pulse.py` | `data/pulse/latest_morning.{json,txt}` + `public/morning.html` (same Approaches; no second rank; store order — no facets, no beacon) |
 | Serve | `scripts/serve.py` | local static server |

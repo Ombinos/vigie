@@ -26,7 +26,7 @@ ASSET_EXTENSIONS = {
 }
 # Locally served publisher preview images (scripts/fetch_brief_media.py).
 MEDIA_NAME = re.compile(r"[a-f0-9]{20}\.(?:jpg|jpeg|png|webp|avif|gif)")
-MEDIA_MAX_BYTES = 700_000
+MEDIA_MAX_BYTES = 900_000
 
 
 class PageLinks(HTMLParser):

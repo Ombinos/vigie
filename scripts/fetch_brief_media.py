@@ -1,4 +1,4 @@
-"""Vigie brief media v1 - locally served publisher preview images.
+"""Vigie brief media v2 - locally served publisher images, self-diagnosed.
 
 The front door must never make a reader's browser contact a publisher: that
 would trade the product's core promise (no account, no tracking, one origin)
@@ -10,13 +10,25 @@ ever emits same-origin /media/<uid>.<ext> references; staging refuses any
 media file that does not match that shape.
 
 House law:
-  * publisher og:image / twitter:image only - never stock, never generated,
-    never a crop we invent. A silent publisher means no image, not a filler.
+  * publisher-provided images only: og:image / twitter:image on the article,
+    or an image enclosure / media:content carried by the publisher's OWN feed
+    when the article page is blocked or silent. Never stock, never generated,
+    never a crop we invent. A publisher silent on both channels means no
+    image, not a filler.
   * bytes are sniffed, not trusted: the declared Content-Type never decides
     the stored extension, and SVG is never stored - a scriptable format is
     never served from our own origin.
   * identity is the renderer's identity: uid = sha256(safe_url(url))[:20],
     the exact derivation prepare_items uses, so bookmarks and marks survive.
+  * every missing image carries a diagnosed reason (article_http_403,
+    article_timeout, image_too_large with its byte count, ...) - "no image"
+    is a fact Vigie can explain, not a shrug.
+  * the wallet is protected from itself: dead articles (404/410) and guard
+    rejections are permanent; bot walls become permanent after two attempts;
+    transient failures back off to one retry per day after four attempts.
+  * each run leaves a health ledger (data/ops/media_health.json): reason
+    histogram, per-domain failures, capped run history - the machine room
+    learns which publishers block, which go quiet, and what the fixes cost.
   * fail-soft like the roadworks feed: a media outage keeps the previous
     manifest and never blocks the news pipeline (always exits 0).
   * the manifest never references a missing file; orphan files are pruned
@@ -37,29 +49,60 @@ import re
 import sys
 import time
 import urllib.request
-from datetime import datetime, timezone
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import fetch_media  # noqa: E402  (fetch_html, extract_og, USER_AGENT, TIMEOUT)
+import fetch_media  # noqa: E402  (fetch_html, extract_og, safe_image_url, USER_AGENT, TIMEOUT)
 import resident_brief as brief  # noqa: E402  (safe_url - identity must match the renderer)
-from ingest_rss import public_http_url, public_opener  # noqa: E402
+from ingest_rss import MAX_FEED_BYTES, public_http_url, public_opener  # noqa: E402
 
 RANKED = ROOT / "data" / "normalized" / "latest_ranked.json"
 ENRICHED = ROOT / "data" / "normalized" / "latest_enriched.json"
 MEDIA_DIR = ROOT / "data" / "media" / "brief"
 MANIFEST = ROOT / "data" / "media" / "brief_manifest.json"
+RAW_DIR = ROOT / "data" / "raw"
+HEALTH = ROOT / "data" / "ops" / "media_health.json"
 
-METHOD = "brief-media-v1"
+METHOD = "brief-media-v2"
+# v1 manifests carry the same uid/file shape; accepting them migrates the
+# existing image store without a blind refetch storm on upgrade.
+LOADABLE_METHODS = frozenset({"brief-media-v1", METHOD})
 SCOPE_CAP = 60        # top articles in display order whose images the brief tracks
-FETCH_CAP = 40        # new article fetches per run ceiling - wallet thin
-MAX_IMAGE_BYTES = 700_000
+FETCH_CAP = 40        # network fetch rounds per run ceiling - wallet thin
+MAX_IMAGE_BYTES = 900_000
 SLEEP = 0.08
 FILE_RE = re.compile(r"[a-f0-9]{20}\.(?:jpg|jpeg|png|webp|avif|gif)")
+
+# Media-sentinel retry policy: diagnosed facts decide what deserves a retry.
+PERMANENT_REASONS = frozenset({
+    "article_http_404", "article_http_410",
+    "article_guard_rejected", "image_guard_rejected",
+})
+BLOCKED_REASONS = frozenset({"article_http_403", "image_http_403"})
+BLOCKED_ATTEMPTS_CAP = 2     # a bot wall that stood twice stands
+TRANSIENT_ATTEMPTS_CAP = 4   # timeouts/network: retry every run, then back off
+QUIET_ATTEMPTS_CAP = 2       # publisher silent on both channels: check daily
+BACKOFF_HOURS = 24
+
+# Feed-media fallback: the publisher's own RSS/Atom attachments, read from
+# the raw XML snapshots ingest_rss already keeps on disk. Local reads only.
+FEED_INDEX_CAP = 4000
+FEED_INDEX_PER_SOURCE_CAP = 400
+# Some publishers (Journal de Québec) declare the MRSS namespace with the
+# https variant; both spellings are the same vocabulary.
+MEDIA_NS = frozenset({"http://search.yahoo.com/mrss/", "https://search.yahoo.com/mrss/"})
+IMG_EXT_RE = re.compile(r"\.(?:jpe?g|png|webp|avif|gif)(?:[?#]|$)", re.I)
+DOCTYPE_RE = re.compile(br"<!\s*(?:DOCTYPE|ENTITY)\b", re.I)
+
+HEALTH_METHOD = "media-health-v1"
+HEALTH_HISTORY_CAP = 28
 
 
 def sniff_image(raw: bytes) -> str | None:
@@ -83,11 +126,26 @@ def sniff_image(raw: bytes) -> str | None:
     return None
 
 
-def fetch_image(url: str, referer: str = "", *, retries: int = 2) -> tuple[bytes, str] | None:
-    """Guarded image GET -> (bytes, true extension) or None. Never raises."""
+def fetch_image(url: str, referer: str = "", *, retries: int = 2,
+                diag: dict | None = None) -> tuple[bytes, str] | None:
+    """Guarded image GET -> (bytes, true extension) or None. Never raises.
+
+    When `diag` is a dict it receives {"reason", "detail"} classifying the
+    rejection: image_http_403/404/410/4xx/5xx, image_timeout,
+    image_network_error, image_guard_rejected, image_too_large (with the
+    measured size), image_unsupported_format (with the declared type).
+    """
+    last: tuple[str, str] = ("image_rejected", "")
+
+    def fail(reason: str, detail: str = "") -> None:
+        if isinstance(diag, dict):
+            diag["reason"] = reason
+            diag["detail"] = str(detail)[:160]
+
     try:
         public_http_url(url, resolve=True)
-    except (ValueError, OSError, TypeError):
+    except (ValueError, OSError, TypeError) as exc:
+        fail("image_guard_rejected", f"{type(exc).__name__}: {exc}")
         return None
     headers = {
         "User-Agent": fetch_media.USER_AGENT,
@@ -98,24 +156,227 @@ def fetch_image(url: str, referer: str = "", *, retries: int = 2) -> tuple[bytes
     opener = public_opener()
     attempts = max(1, min(retries, 3))
     for attempt in range(attempts):
+        ctype = ""
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with opener.open(req, timeout=fetch_media.TIMEOUT) as resp:
                 length = resp.headers.get("Content-Length")
+                ctype = resp.headers.get("Content-Type") or ""
                 if length and str(length).isdigit() and int(length) > MAX_IMAGE_BYTES:
+                    fail("image_too_large", f"content_length={length}")
                     return None
                 raw = resp.read(MAX_IMAGE_BYTES + 1)
-        except ValueError:
+        except ValueError as exc:
+            fail("image_guard_rejected", f"{type(exc).__name__}: {exc}")
             return None  # a guarded redirect failure is never retried
-        except (OSError, urllib.error.URLError, http.client.HTTPException):
+        except urllib.error.HTTPError as exc:
+            last = (fetch_media._classify_http_error(exc.code, "image"), f"HTTP {exc.code}")
+            if attempt + 1 < attempts:
+                time.sleep(0.35 * (attempt + 1))
+            continue
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+            reason = "image_timeout" if fetch_media._is_timeout(exc) else "image_network_error"
+            last = (reason, f"{type(exc).__name__}: {exc}")
             if attempt + 1 < attempts:
                 time.sleep(0.35 * (attempt + 1))
             continue
         if len(raw) > MAX_IMAGE_BYTES:
+            fail("image_too_large", f"bytes>{MAX_IMAGE_BYTES}")
             return None
         ext = sniff_image(raw)
-        return (raw, ext) if ext else None
+        if not ext:
+            fail("image_unsupported_format", f"declared={ctype[:60]}")
+            return None
+        return (raw, ext)
+    fail(*last)
     return None
+
+
+def _norm_url(url: object) -> str:
+    return url.strip().rstrip("/") if isinstance(url, str) else ""
+
+
+def _local(tag: object) -> str:
+    return tag.rsplit("}", 1)[-1].lower() if isinstance(tag, str) else ""
+
+
+def _feed_item_image(item: ET.Element) -> str | None:
+    """First publisher image attached to a feed item, guarded HTTPS or None.
+
+    Accepts RSS <enclosure type="image/..."> and MRSS <media:content> /
+    <media:thumbnail> - attachments from the publisher's own feed, the same
+    provenance class as og:image. Everything else (comments, inline HTML,
+    private hosts, plain HTTP, SVG-by-extension) is skipped.
+    """
+    for child in item.iter():
+        tag = child.tag if isinstance(child.tag, str) else ""
+        local = _local(tag)
+        ns = tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
+        url = ""
+        if local == "enclosure":
+            typ = (child.attrib.get("type") or "").lower()
+            candidate = child.attrib.get("url") or ""
+            if typ.startswith("image/") or (not typ and IMG_EXT_RE.search(candidate)):
+                url = candidate
+        elif ns in MEDIA_NS and local in ("content", "thumbnail"):
+            typ = (child.attrib.get("type") or "").lower()
+            medium = (child.attrib.get("medium") or "").lower()
+            candidate = child.attrib.get("url") or ""
+            if medium == "image" or typ.startswith("image/") or (not typ and not medium and IMG_EXT_RE.search(candidate)):
+                url = candidate
+        if url:
+            safe = fetch_media.safe_image_url(url)
+            if safe and not safe.lower().endswith(".svg"):
+                return safe
+    return None
+
+
+def _feed_item_link(item: ET.Element) -> str | None:
+    """Item link, mirroring parse_feed: RSS text link, permalink guid, Atom href."""
+    for child in item:
+        if _local(child.tag) == "link":
+            text = " ".join("".join(child.itertext()).split())
+            if text:
+                return text
+            href = child.attrib.get("href")
+            rel = child.attrib.get("rel", "alternate")
+            if href and rel in ("alternate", ""):
+                return href
+    guid_el = next((c for c in item if _local(c.tag) == "guid"), None)
+    if guid_el is not None and guid_el.attrib.get("isPermaLink", "true").lower() != "false":
+        text = " ".join("".join(guid_el.itertext()).split())
+        if text.startswith(("https://", "http://")):
+            return text
+    return None
+
+
+def build_feed_media_index(raw_dir: Path = RAW_DIR) -> dict[str, str]:
+    """normalized article URL -> publisher feed image URL, from the latest
+    raw XML snapshot per source. Local reads only; corrupt, oversized or
+    entity-declaring XML is skipped, never fatal."""
+    index: dict[str, str] = {}
+    raw_dir = Path(raw_dir)
+    if not raw_dir.is_dir():
+        return index
+    for src_dir in sorted(raw_dir.iterdir()):
+        if not src_dir.is_dir() or len(index) >= FEED_INDEX_CAP:
+            continue
+        xmls = sorted(src_dir.glob("*.xml"))
+        if not xmls:
+            continue
+        try:
+            xml_bytes = xmls[-1].read_bytes()
+        except OSError:
+            continue
+        if len(xml_bytes) > MAX_FEED_BYTES or DOCTYPE_RE.search(xml_bytes.replace(b"\x00", b"")):
+            continue
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            continue
+        added = 0
+        for item in root.iter():
+            if added >= FEED_INDEX_PER_SOURCE_CAP or len(index) >= FEED_INDEX_CAP:
+                break
+            if _local(item.tag) not in ("item", "entry"):
+                continue
+            link = _feed_item_link(item)
+            if not link or not link.startswith(("https://", "http://")):
+                continue
+            image = _feed_item_image(item)
+            if image and index.setdefault(_norm_url(link), image) is not None:
+                added += 1
+    return index
+
+
+def _gate_active(entry: dict, now: datetime) -> bool:
+    """True while a backed-off entry must not be retried."""
+    stamp = entry.get("retry_after")
+    if not isinstance(stamp, str):
+        return False
+    try:
+        when = datetime.fromisoformat(stamp)
+    except ValueError:
+        return False
+    return when > now
+
+
+def _apply_policy(entry: dict, reason: str, attempts: int, now: datetime) -> None:
+    """Classify a negative result: permanent, capped-then-permanent, or backed off."""
+    entry["attempts"] = attempts
+    entry["reason"] = reason
+    entry.pop("retry_after", None)
+    if reason in PERMANENT_REASONS:
+        entry["permanent"] = True
+        return
+    entry.pop("permanent", None)
+    if reason in BLOCKED_REASONS:
+        cap = BLOCKED_ATTEMPTS_CAP
+    elif reason == "no_publisher_image":
+        cap = QUIET_ATTEMPTS_CAP
+    else:
+        cap = TRANSIENT_ATTEMPTS_CAP
+    if attempts >= cap:
+        if reason in BLOCKED_REASONS:
+            entry["permanent"] = True
+        else:
+            entry["retry_after"] = (now + timedelta(hours=BACKOFF_HOURS)).isoformat(timespec="seconds")
+
+
+def write_health_ledger(doc: dict, path: Path = HEALTH) -> None:
+    """Machine-room record: why images are missing, per domain, over time.
+
+    Fail-soft by design - a ledger problem never breaks the media step.
+    """
+    try:
+        entries = doc.get("media") if isinstance(doc.get("media"), dict) else {}
+        reasons: dict[str, int] = {}
+        by_domain: dict[str, dict] = {}
+        for entry in entries.values():
+            if not isinstance(entry, dict) or entry.get("file"):
+                continue
+            reason = str(entry.get("reason") or "unknown")
+            reasons[reason] = reasons.get(reason, 0) + 1
+            host = (urlparse(str(entry.get("article_url") or "")).hostname or "?").lower()
+            dom = by_domain.setdefault(host, {"missing": 0, "reasons": {}})
+            dom["missing"] += 1
+            dom["reasons"][reason] = dom["reasons"].get(reason, 0) + 1
+        snapshot = {
+            "fetched_at": doc.get("fetched_at"),
+            "scope": doc.get("scope_count"),
+            "with_image": doc.get("with_image"),
+            "missing": sum(reasons.values()),
+            "reasons": dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "by_domain": {
+                host: {"missing": d["missing"], "top_reason": max(d["reasons"], key=d["reasons"].get)}
+                for host, d in sorted(by_domain.items(), key=lambda kv: -kv[1]["missing"])
+            },
+            "permanent": sum(1 for e in entries.values() if isinstance(e, dict) and e.get("permanent")),
+            "backed_off": sum(1 for e in entries.values() if isinstance(e, dict) and e.get("retry_after")),
+            "budget_used": doc.get("fetched_this_run"),
+            "feed_resolved": doc.get("feed_resolved"),
+        }
+        path = Path(path)
+        history: list[dict] = []
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(prev, dict) and prev.get("method") == HEALTH_METHOD and isinstance(prev.get("history"), list):
+                history = [h for h in prev["history"] if isinstance(h, dict)]
+        except (OSError, ValueError):
+            history = []
+        history.append({k: snapshot[k] for k in ("fetched_at", "with_image", "missing", "budget_used", "feed_resolved")})
+        out = {
+            "method": HEALTH_METHOD,
+            "updated_at": snapshot["fetched_at"],
+            "latest": snapshot,
+            "history": history[-HEALTH_HISTORY_CAP:],
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        part = path.with_name(path.name + ".tmp")
+        part.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        part.replace(path)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
 
 
 def brief_uid(url: object) -> str:
@@ -151,12 +412,17 @@ def load_scope() -> list[dict]:
 
 
 def load_manifest(path: Path = MANIFEST) -> dict:
-    """uid -> entry from a brief-media-v1 manifest; foreign or corrupt -> {}."""
+    """uid -> entry from a brief-media manifest; foreign or corrupt -> {}.
+
+    Accepts v1 as well as the current method so an upgrade never discards
+    the existing image store (same uid/file shape; v1 negatives simply
+    carry no attempt history yet).
+    """
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    if not isinstance(doc, dict) or doc.get("method") != METHOD:
+    if not isinstance(doc, dict) or doc.get("method") not in LOADABLE_METHODS:
         return {}
     media = doc.get("media")
     if not isinstance(media, dict):
@@ -165,13 +431,22 @@ def load_manifest(path: Path = MANIFEST) -> dict:
 
 
 def update_media(scope: list[dict], *, offline: bool = False,
-                 media_dir: Path = MEDIA_DIR, manifest_path: Path = MANIFEST) -> dict:
+                 media_dir: Path = MEDIA_DIR, manifest_path: Path = MANIFEST,
+                 raw_dir: Path | None = None, health_path: Path | None = None) -> dict:
     """Advance the local image store by one collection; returns the new manifest.
 
-    Keeps still-scoped entries whose file exists, retries negatives and fills
-    gaps within the fetch budget, rewrites the manifest durably, then prunes
-    orphan files. The manifest never references a missing file.
+    Keeps still-scoped entries whose file exists, retries negatives per the
+    diagnosed-retry policy (permanent / blocked / backed-off entries cost
+    nothing), fills gaps within the fetch budget - og:image first, the
+    publisher's own feed attachment as fallback - rewrites the manifest
+    durably, records the health ledger, then prunes orphan files. The
+    manifest never references a missing file.
+
+    raw_dir / health_path default to the module attributes resolved at call
+    time so tests can patch them.
     """
+    raw_root = Path(raw_dir) if raw_dir is not None else RAW_DIR
+    health_file = Path(health_path) if health_path is not None else HEALTH
     previous = load_manifest(manifest_path)
     scoped: list[tuple[str, dict]] = []
     seen: set[str] = set()
@@ -196,35 +471,62 @@ def update_media(scope: list[dict], *, offline: bool = False,
             entries[uid] = prev
             reused += 1
         elif not file:
-            entries[uid] = prev  # negative result - retried within budget below
+            entries[uid] = prev  # negative result - retried per policy below
 
+    now = datetime.now(timezone.utc)
     budget = 0 if offline else FETCH_CAP
     fetched = 0
+    feed_resolved = 0
+    index: dict[str, str] | None = None
     for uid, cand in scoped:
         if budget <= 0:
             break
-        if entries.get(uid, {}).get("file"):
+        prev = entries.get(uid)
+        if isinstance(prev, dict) and prev.get("file"):
             continue
+        if isinstance(prev, dict) and (prev.get("permanent") or _gate_active(prev, now)):
+            continue  # diagnosed dead end or backed off - costs nothing
         url = brief.safe_url(cand.get("url"))
         if not url:
             entries.pop(uid, None)
             continue
+        if index is None:
+            index = build_feed_media_index(raw_root)
+        feed_img = index.get(_norm_url(url))
+        prev_reason = prev.get("reason") if isinstance(prev, dict) else None
+        attempts = int(prev.get("attempts") or 0) if isinstance(prev, dict) else 0
+        # The publisher was silent on the page itself but their own feed
+        # carries an image: skip the HTML round-trip entirely.
+        image_only = prev_reason == "no_publisher_image" and bool(feed_img)
         budget -= 1
         fetched += 1
+        attempts += 1
         entry: dict = {
             "status": "proposed", "file": None, "image_url": None, "article_url": url,
-            "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "fetched_at": now.isoformat(timespec="seconds"),
         }
-        html = fetch_media.fetch_html(url)
-        image_url = fetch_media.extract_og(html, url) if html else None
-        if not html:
-            entry["reason"] = "fetch_failed"
-        elif not image_url:
-            entry["reason"] = "no og:image"
-        else:
-            got = fetch_image(image_url, referer=url)
+        diag: dict = {}
+        html = None if image_only else fetch_media.fetch_html(url, diag=diag)
+        image_url = None
+        source = None
+        if html:
+            image_url = fetch_media.extract_og(html, url)
+            if image_url:
+                source = "og:image"
+            elif feed_img:
+                image_url, source = feed_img, "feed"
+        elif feed_img and diag.get("reason") not in PERMANENT_REASONS:
+            # Article page unreachable (bot wall, timeout) but the publisher's
+            # own feed attaches an image - same provenance, honest fallback.
+            image_url, source = feed_img, "feed"
+        if image_url:
+            img_diag: dict = {}
+            got = fetch_image(image_url, referer=url, diag=img_diag)
             if got is None:
-                entry.update(reason="image_rejected", image_url=image_url)
+                reason = img_diag.get("reason") or "image_rejected"
+                entry.update(reason=reason, image_url=image_url, image_source=source,
+                             last_error=img_diag.get("detail", ""))
+                _apply_policy(entry, reason, attempts, now)
             else:
                 raw, ext = got
                 name = f"{uid}.{ext}"
@@ -232,8 +534,15 @@ def update_media(scope: list[dict], *, offline: bool = False,
                 part = media_dir / f".{name}.part"
                 part.write_bytes(raw)
                 part.replace(media_dir / name)
-                entry.update(reason="publisher og:image", image_url=image_url,
-                             file=name, bytes=len(raw), format=ext)
+                entry.update(reason="publisher og:image" if source == "og:image" else "publisher feed media",
+                             image_url=image_url, image_source=source,
+                             file=name, bytes=len(raw), format=ext, attempts=attempts)
+                if source == "feed":
+                    feed_resolved += 1
+        else:
+            reason = "no_publisher_image" if html else (diag.get("reason") or "article_fetch_failed")
+            entry.update(reason=reason, last_error=diag.get("detail", ""))
+            _apply_policy(entry, reason, attempts, now)
         entries[uid] = entry
         time.sleep(SLEEP)
 
@@ -242,21 +551,31 @@ def update_media(scope: list[dict], *, offline: bool = False,
         uid: e for uid, e in entries.items()
         if not e.get("file") or (media_dir / str(e["file"])).is_file()
     }
+    reason_counts: dict[str, int] = {}
+    for e in entries.values():
+        if not e.get("file"):
+            r = str(e.get("reason") or "unknown")
+            reason_counts[r] = reason_counts.get(r, 0) + 1
     doc = {
         "method": METHOD,
         "status": "proposed",
-        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "fetched_at": now.isoformat(timespec="seconds"),
         "scope_count": len(scoped),
         "entry_count": len(entries),
         "with_image": sum(1 for e in entries.values() if e.get("file")),
         "fetched_this_run": fetched,
         "reused": reused,
+        "feed_resolved": feed_resolved,
+        "permanent_count": sum(1 for e in entries.values() if e.get("permanent")),
+        "backed_off_count": sum(1 for e in entries.values() if e.get("retry_after")),
+        "reasons": dict(sorted(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         "media": entries,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     part = manifest_path.with_name(manifest_path.name + ".tmp")
     part.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     part.replace(manifest_path)
+    write_health_ledger(doc, health_file)
 
     # Prune orphans only after the new manifest is durable.
     referenced = {str(e["file"]) for e in entries.values() if e.get("file")}
@@ -293,8 +612,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(f"brief media -> {MANIFEST.relative_to(ROOT)}")
     print(f"  scope={doc['scope_count']} with_image={doc['with_image']} "
-          f"fetched={doc['fetched_this_run']} reused={doc['reused']} pruned={doc['pruned']}"
+          f"fetched={doc['fetched_this_run']} reused={doc['reused']} "
+          f"feed={doc['feed_resolved']} permanent={doc['permanent_count']} "
+          f"pruned={doc['pruned']}"
           + (" (offline)" if args.offline else ""))
+    if doc["reasons"]:
+        top = ", ".join(f"{r}={n}" for r, n in list(doc["reasons"].items())[:4])
+        print(f"  missing: {top}")
     # Fail-soft by design: a media outage never blocks the news pipeline.
     return 0
 
