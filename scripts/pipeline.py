@@ -1,8 +1,10 @@
 """Vigie v0 - one-command Critical Path.
 
-Runs: ingest (RSS + official WZDX roadworks) -> normalize -> enrich -> cluster
--> rank/display. Stdlib only. Does not start the server (open a second terminal
-for that). Offline mode reuses raw snapshots and makes no network requests.
+Runs: ingest (RSS + official WZDX roadworks) -> feed health -> normalize ->
+enrich -> cluster -> edge atlas + anomaly rules -> brief media -> rank/display
+-> edition metrics -> watchdog. Stdlib only. Does not start the server (open a
+second terminal for that). Offline mode reuses raw snapshots and makes no
+network requests.
 
 Usage (from repo root):
   python scripts/pipeline.py
@@ -22,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = [
     "ingest_rss.py",
     "ingest_wzdx.py",
+    "feed_health.py",
     "normalize.py",
     "enrich.py",
     "cluster_issues.py",
@@ -29,7 +32,15 @@ SCRIPTS = [
     "compile_anomalies.py",
     "fetch_brief_media.py",
     "rank_display.py",
+    "compile_metrics.py",
+    "compile_watchdog.py",
 ]
+# Selection is by name, not position: render-only is exactly the display
+# step; offline drops the one step that cannot work from snapshots and
+# flags the two network steps that can.
+RENDER_ONLY = ("rank_display.py",)
+OFFLINE_SKIP = frozenset({"ingest_rss.py"})
+OFFLINE_FLAGGED = frozenset({"ingest_wzdx.py", "fetch_brief_media.py"})
 
 
 def run(script: str, *extra: str) -> None:
@@ -48,10 +59,15 @@ def main() -> int:
     mode.add_argument("--render-only", action="store_true", help="Render the existing enriched store without changing upstream data")
     parser.add_argument("--stage", action="store_true", help="Validate and stage the complete static release after building")
     args = parser.parse_args()
-    selected = SCRIPTS[-1:] if args.render_only else SCRIPTS[1:] if args.offline else SCRIPTS
+    if args.render_only:
+        selected = list(RENDER_ONLY)
+    elif args.offline:
+        selected = [name for name in SCRIPTS if name not in OFFLINE_SKIP]
+    else:
+        selected = list(SCRIPTS)
     print("Vigie pipeline" + (" (offline snapshots)" if args.offline else " (render existing store)" if args.render_only else " (refresh sources)"))
     for name in selected:
-        if args.offline and name in ("ingest_wzdx.py", "fetch_brief_media.py"):
+        if args.offline and name in OFFLINE_FLAGGED:
             run(name, "--offline")
         else:
             run(name)

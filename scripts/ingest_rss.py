@@ -197,44 +197,130 @@ def public_opener():
     )
 
 
+def _http_cache_path() -> Path:
+    """Resolved through RAW_DIR at call time so tests can redirect it."""
+    return RAW_DIR / "_http_cache.json"
+
+
+def _body_cache_path(url: str) -> Path:
+    return RAW_DIR / "_bodies" / (hashlib.sha256(url.encode()).hexdigest()[:32] + ".body")
+
+
+def _load_http_cache() -> dict:
+    try:
+        doc = json.loads(_http_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _save_http_cache(cache: dict) -> None:
+    try:
+        path = _http_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        part = path.with_name(path.name + ".tmp")
+        part.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
+        part.replace(path)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _read_body_cache(url: str) -> bytes | None:
+    try:
+        raw = _body_cache_path(url).read_bytes()
+    except OSError:
+        return None
+    return raw or None
+
+
+def _write_body_cache(url: str, raw: bytes) -> None:
+    try:
+        path = _body_cache_path(url)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        part = path.with_name(path.name + ".tmp")
+        part.write_bytes(raw)
+        part.replace(path)
+    except OSError:
+        pass
+
+
 def fetch_bytes(url: str) -> tuple[bytes, str | None]:
-    """Fetch with retries and optional alternate URLs (CBC scar)."""
+    """Fetch with retries, optional alternate URLs (CBC scar) and conditional GET.
+
+    Bandwidth is rent: when a server previously sent an ETag or
+    Last-Modified, the next request carries the matching conditional header
+    and a 304 answer returns the cached body - zero payload bytes on the
+    wire, caller unchanged (the snapshot digest simply repeats, which
+    ingest_one records as not_modified). A validator without a cached body
+    falls back to one unconditional fetch. Cache files live beside the raw
+    snapshots; a corrupt cache degrades to unconditional fetching, never to
+    a wrong body.
+    """
     candidates = [url] + list(URL_ALTERNATES.get(url, []))
     opener = public_opener()
+    cache = _load_http_cache()
     last_err: Exception | None = None
     for candidate in candidates:
-        for attempt in range(1, RETRIES + 1):
-            try:
-                public_http_url(candidate, resolve=True)
-                req = urllib.request.Request(
-                    candidate,
-                    headers={
+        entry = cache.get(candidate)
+        entry = entry if isinstance(entry, dict) else {}
+        validators: dict[str, str] = {}
+        if isinstance(entry.get("etag"), str) and entry["etag"]:
+            validators["If-None-Match"] = entry["etag"]
+        if isinstance(entry.get("last_modified"), str) and entry["last_modified"]:
+            validators["If-Modified-Since"] = entry["last_modified"]
+        for conditional in ((True, False) if validators else (False,)):
+            for attempt in range(1, RETRIES + 1):
+                try:
+                    public_http_url(candidate, resolve=True)
+                    headers = {
                         "User-Agent": USER_AGENT,
                         "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
                         "Accept-Language": "en-CA,fr-CA;q=0.9,en;q=0.8",
-                    },
-                    method="GET",
-                )
-                with opener.open(req, timeout=TIMEOUT) as resp:
-                    content_type = resp.headers.get("Content-Type")
-                    content_length = resp.headers.get("Content-Length")
-                    # Header hint only — a malformed or absent value must not
-                    # fail the fetch; the bounded read below is the real cap.
-                    try:
-                        declared = int(content_length) if content_length else None
-                    except ValueError:
-                        declared = None
-                    if declared is not None and declared > MAX_FEED_BYTES:
-                        raise ValueError("Feed exceeds size limit")
-                    body = resp.read(MAX_FEED_BYTES + 1)
-                    if len(body) > MAX_FEED_BYTES:
-                        raise ValueError("Feed exceeds size limit")
-                    return body, content_type
-            except ValueError:
-                raise
-            except Exception as e:
-                last_err = e
-                continue
+                    }
+                    if conditional:
+                        headers.update(validators)
+                    req = urllib.request.Request(candidate, headers=headers, method="GET")
+                    with opener.open(req, timeout=TIMEOUT) as resp:
+                        content_type = resp.headers.get("Content-Type")
+                        content_length = resp.headers.get("Content-Length")
+                        # Header hint only — a malformed or absent value must not
+                        # fail the fetch; the bounded read below is the real cap.
+                        try:
+                            declared = int(content_length) if content_length else None
+                        except ValueError:
+                            declared = None
+                        if declared is not None and declared > MAX_FEED_BYTES:
+                            raise ValueError("Feed exceeds size limit")
+                        body = resp.read(MAX_FEED_BYTES + 1)
+                        if len(body) > MAX_FEED_BYTES:
+                            raise ValueError("Feed exceeds size limit")
+                        etag = resp.headers.get("ETag")
+                        last_modified = resp.headers.get("Last-Modified")
+                        has_etag = isinstance(etag, str) and bool(etag)
+                        has_lm = isinstance(last_modified, str) and bool(last_modified)
+                        if has_etag or has_lm:
+                            cache[candidate] = {
+                                "etag": etag if has_etag else None,
+                                "last_modified": last_modified if has_lm else None,
+                                "content_type": content_type,
+                                "updated_at": utc_now().isoformat(timespec="seconds"),
+                            }
+                            _save_http_cache(cache)
+                            _write_body_cache(candidate, body)
+                        return body, content_type
+                except ValueError:
+                    raise
+                except urllib.error.HTTPError as e:
+                    if e.code == 304 and conditional:
+                        cached_body = _read_body_cache(candidate)
+                        if cached_body is not None:
+                            return cached_body, entry.get("content_type")
+                        break  # validator without body: refetch unconditionally
+                    last_err = e
+                    continue
+                except Exception as e:
+                    last_err = e
+                    continue
     assert last_err is not None
     raise last_err
 
@@ -366,6 +452,10 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
         return err
 
     digest = sha256_hex(raw)
+    prev_xmls = sorted(dest_dir.glob("*.xml"))
+    # The collection happened; the bytes simply repeat the previous snapshot
+    # (a 304 or an unchanged feed). Recorded as a fact, never hidden.
+    not_modified = bool(prev_xmls) and prev_xmls[-1].name.endswith(f"_{digest[:12]}.xml")
     xml_path = dest_dir / f"{stamp}_{digest[:12]}.xml"
     xml_path.write_bytes(raw)
 
@@ -410,6 +500,7 @@ def ingest_one(src: dict, fetched_at: datetime) -> dict:
         "sha256": digest,
         "xml_file": rel_or_abs(xml_path),
         "raw_item_count": raw_item_count,
+        "not_modified": not_modified,
         "max_items": max_items if isinstance(max_items, int) else None,
         "capped": capped,
         "item_count": len(items),
